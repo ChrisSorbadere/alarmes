@@ -12,16 +12,18 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
+
+      - uses: android-actions/setup-android@v3
 
       - name: Dépendances Capacitor
         run: npm ci
@@ -40,7 +42,11 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          set -o pipefail
+          if ! ./gradlew --no-daemon assembleRelease 2>&1 | tee build.log; then
+            grep -E "error:|e: |FAILURE|What went wrong|> |Exception" build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
           cp app/build/outputs/apk/release/app-release.apk ../Alarmes-${APP_VERSION}-b${{ github.run_number }}.apk
 
       - uses: actions/upload-artifact@v4

@@ -263,3 +263,12 @@ input[type=search] { width: 100%; padding: 11px 12px; border-radius: 12px; borde
 .selbtns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .selbtns .btn { padding: 9px 4px; font-size: 13px; }
 body.selmode { padding-bottom: calc(var(--sab) + 170px); }
+
+.alarm { touch-action: pan-y; -webkit-user-select: none; user-select: none; }
+.alarm.swiping { background: linear-gradient(90deg, var(--card) 70%, #fee2e2); }
+.dayhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dayhead h2 { flex: 1; }
+.dayhead .btn { flex: none; margin-top: 12px; }
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast[hidden] { display: none !important; }
+.toast-btn { border: 0; background: #fff; color: #111827; font-weight: 700; border-radius: 9px; padding: 6px 10px; flex: none; }

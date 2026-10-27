@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -257,6 +257,44 @@ async function togglePreview(snd) {
   } catch (e) { toast('Son illisible'); previewing = false; }
 }
 
+/** Itinéraire Google Maps vers le lieu joint. */
+function placeNavUrl(place) {
+  if (!place) return '';
+  const u = place.url || '';
+  const m = u.match(/[?&](?:query|q|destination)=([^&]+)/);
+  if (m) return 'https://www.google.com/maps/dir/?api=1&destination=' + m[1];
+  if (u) return u;
+  return place.label ? 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(place.label) : '';
+}
+function extrasPayload(a) {
+  return {
+    photoCount: (a.photos || []).length,
+    contactName: a.contact ? (a.contact.name || '') : '',
+    contactPhone: a.contact ? (a.contact.phone || '') : '',
+    placeLabel: a.place ? (a.place.label || '') : '',
+    placeNavUrl: placeNavUrl(a.place),
+  };
+}
+/** Copie les photos des alarmes là où l'écran de sonnerie Android peut les lire. */
+async function syncPhotos(force) {
+  if (!Native) return;
+  S.photoKeys = S.photoKeys || await DB.get('photoKeys', {});
+  const keep = [];
+  let changed = false;
+  for (const a of S.alarms) {
+    const ph = a.photos || [];
+    if (!ph.length) continue;
+    keep.push(a.id);
+    const key = ph.length + ':' + ph.map(p => p.length).join(',');
+    if (!force && S.photoKeys[a.id] === key) continue;
+    try { await Native.setPhotos({ id: a.id, photos: ph }); S.photoKeys[a.id] = key; changed = true; } catch (e) { /* ignore */ }
+  }
+  for (const id of Object.keys(S.photoKeys)) if (!keep.includes(id)) { delete S.photoKeys[id]; changed = true; }
+  if (S.lastTestId) keep.push(S.lastTestId);
+  try { await Native.prunePhotos({ keep }); } catch (e) { /* ignore */ }
+  if (changed) await DB.set('photoKeys', S.photoKeys);
+}
+
 function nativePayload() {
   const now = new Date();
   const to = addDays(now, HORIZON_DAYS);
@@ -274,6 +312,7 @@ function nativePayload() {
         mode: a.mode || 'alarm',
         alarmId: a.id,
         hasExtras: !!((a.photos && a.photos.length) || a.contact || a.place),
+        ...extrasPayload(a),
         soundUri: effRing(a).sound ? effRing(a).sound.uri : '',
         durationMin: effRing(a).durationMin,
         repeats: effRing(a).repeats,
@@ -290,6 +329,7 @@ async function syncNative() {
   const list = nativePayload();
   lastSync = { count: list.length, until: list.length ? new Date(list[list.length - 1].at) : null };
   if (!Native) return;
+  await syncPhotos();
   try {
     await Native.setAll({ alarms: list, snoozeMin: Number(S.settings.snoozeMin) || 10 });
   } catch (e) {
@@ -325,7 +365,12 @@ function showRing(a, when, ringIndex = 0) {
     <div class="t">${fmtTime(when || new Date())}</div>
     <div style="text-align:center;opacity:.9;text-transform:uppercase;letter-spacing:.1em;font-size:13px">${esc(levelOf(a) ? levelOf(a).label : '')}</div>
     <h3>${esc(a.title || 'Alarme')}</h3>
+    ${(a.photos || []).length ? `<div class="ring-photos">${a.photos.map(p => `<img src="${p}" alt="">`).join('')}</div>` : ''}
     <div class="box">${esc(a.description || '(pas de description)')}</div>
+    ${a.contact?.phone || a.place ? `<div class="btns">
+      ${a.contact?.phone ? `<a class="btn" href="tel:${esc(a.contact.phone.replace(/[^\d+]/g, ''))}">📞 Appeler</a>` : ''}
+      ${a.place ? `<a class="btn" href="${esc(placeNavUrl(a.place))}" target="_blank" rel="noopener">📍 Itinéraire</a>` : ''}
+    </div>` : ''}
     <div class="btns">
       <button class="btn" data-r="snooze">Snooze ${S.settings.snoozeMin} min</button>
       <button class="btn" data-r="details">Détails</button>
@@ -750,7 +795,10 @@ async function editorAction(act, el) {
     case 'test':
       try {
         const er = effRing(ED);
-        await Native.test({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 });
+        const tid = 'test_' + ED.id;
+        S.lastTestId = tid;
+        if ((ED.photos || []).length) await Native.setPhotos({ id: tid, photos: ED.photos });
+        await Native.test(Object.assign({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 }, extrasPayload(ED), { alarmId: tid }));
         toast('Sonnerie dans 5 secondes… tu peux verrouiller le téléphone.');
       } catch (e) { toast('Test impossible : ' + (e.message || e)); }
       return;

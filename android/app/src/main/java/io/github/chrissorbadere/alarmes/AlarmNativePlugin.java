@@ -11,6 +11,11 @@ import android.media.RingtoneManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.util.Base64;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.HashSet;
+import java.util.Set;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
@@ -99,6 +104,12 @@ public class AlarmNativePlugin extends Plugin {
         a.put("durationMin", call.getInt("durationMin", 1));
         a.put("repeats", call.getInt("repeats", 0));
         a.put("ringIndex", 0);
+        a.put("alarmId", call.getString("alarmId", ""));
+        a.put("photoCount", call.getInt("photoCount", 0));
+        a.put("contactName", call.getString("contactName", ""));
+        a.put("contactPhone", call.getString("contactPhone", ""));
+        a.put("placeLabel", call.getString("placeLabel", ""));
+        a.put("placeNavUrl", call.getString("placeNavUrl", ""));
         long at = System.currentTimeMillis() + seconds * 1000L;
         a.put("at", at);
         try {
@@ -341,5 +352,66 @@ public class AlarmNativePlugin extends Plugin {
             } catch (Exception ignored) {}
             previewPlayer = null;
         }
+    }
+
+    // ---------- Photos jointes (copiées pour l'écran de sonnerie) ----------
+
+    static String safeId(String id) {
+        return id == null ? "x" : id.replaceAll("[^A-Za-z0-9_-]", "_");
+    }
+
+    private File photoDir() {
+        File d = new File(getContext().getFilesDir(), "photos");
+        if (!d.exists()) d.mkdirs();
+        return d;
+    }
+
+    @PluginMethod
+    public void setPhotos(PluginCall call) {
+        String id = safeId(call.getString("id", ""));
+        JSArray arr = call.getArray("photos", new JSArray());
+        File dir = photoDir();
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) if (f.getName().startsWith(id + "_")) f.delete();
+        int n = 0;
+        try {
+            for (int i = 0; i < arr.length(); i++) {
+                String s = arr.getString(i);
+                int comma = s.indexOf(',');
+                byte[] bytes = Base64.decode(comma >= 0 ? s.substring(comma + 1) : s, Base64.DEFAULT);
+                try (FileOutputStream out = new FileOutputStream(new File(dir, id + "_" + n + ".jpg"))) {
+                    out.write(bytes);
+                }
+                n++;
+            }
+        } catch (Exception e) {
+            call.reject("Copie des photos impossible : " + e.getMessage());
+            return;
+        }
+        JSObject r = new JSObject();
+        r.put("count", n);
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void prunePhotos(PluginCall call) {
+        JSArray arr = call.getArray("keep", new JSArray());
+        Set<String> keep = new HashSet<>();
+        try {
+            for (int i = 0; i < arr.length(); i++) keep.add(safeId(arr.getString(i)));
+        } catch (Exception ignored) {}
+        File[] files = photoDir().listFiles();
+        int removed = 0;
+        if (files != null) {
+            for (File f : files) {
+                String name = f.getName();
+                int us = name.lastIndexOf('_');
+                String owner = us > 0 ? name.substring(0, us) : name;
+                if (!keep.contains(owner) && f.delete()) removed++;
+            }
+        }
+        JSObject r = new JSObject();
+        r.put("removed", removed);
+        call.resolve(r);
     }
 }

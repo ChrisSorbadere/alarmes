@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -957,8 +957,10 @@ async function readImportFile(file) {
     const rows = parseICS(await file.text());
     return { fileName: file.name, name, sheets: ['Agenda'], sheet: 'Agenda', rowsBySheet: { Agenda: rows } };
   }
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array', cellDates: false, raw: true });
+  const isText = /\.(csv|tsv|txt)$/i.test(file.name) || /^text\//.test(file.type);
+  const wb = isText
+    ? XLSX.read((await file.text()).replace(/^\uFEFF/, ''), { type: 'string', raw: true })
+    : XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false, raw: true });
   const rowsBySheet = {};
   for (const n of wb.SheetNames) rowsBySheet[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' });
   return { fileName: file.name, name, sheets: wb.SheetNames, sheet: pickSheet(wb), rowsBySheet };

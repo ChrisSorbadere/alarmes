@@ -5,6 +5,12 @@ import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
+import android.media.MediaPlayer;
+import android.media.Ringtone;
+import android.media.RingtoneManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
@@ -31,6 +37,9 @@ import org.json.JSONObject;
 )
 public class AlarmNativePlugin extends Plugin {
     private String pendingOpen = null;
+    private MediaPlayer previewPlayer = null;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable stopPreviewTask = this::releasePreview;
 
     @Override
     public void load() {
@@ -86,6 +95,10 @@ public class AlarmNativePlugin extends Plugin {
         a.put("color", call.getString("color", "#dc2626"));
         a.put("levelLabel", call.getString("levelLabel", "Test"));
         a.put("mode", call.getString("mode", "alarm"));
+        a.put("soundUri", call.getString("soundUri", ""));
+        a.put("durationMin", call.getInt("durationMin", 1));
+        a.put("repeats", call.getInt("repeats", 0));
+        a.put("ringIndex", 0);
         long at = System.currentTimeMillis() + seconds * 1000L;
         a.put("at", at);
         try {
@@ -218,5 +231,115 @@ public class AlarmNativePlugin extends Plugin {
             return;
         }
         call.resolve(r);
+    }
+
+    // ---------- Choix du son ----------
+
+    @PluginMethod
+    public void pickSystemSound(PluginCall call) {
+        Intent i = new Intent(RingtoneManager.ACTION_RINGTONE_PICKER);
+        i.putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALL);
+        i.putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Son de l'alarme");
+        i.putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true);
+        i.putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false);
+        i.putExtra(RingtoneManager.EXTRA_RINGTONE_DEFAULT_URI, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM));
+        String cur = call.getString("current", "");
+        if (cur != null && !cur.isEmpty()) i.putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(cur));
+        try {
+            startActivityForResult(call, i, "systemSoundResult");
+        } catch (Exception e) {
+            call.reject("Sélecteur de sonneries indisponible");
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @ActivityCallback
+    private void systemSoundResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        JSObject r = new JSObject();
+        Intent data = result.getData();
+        Uri uri = data != null ? (Uri) data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI) : null;
+        if (result.getResultCode() != android.app.Activity.RESULT_OK || uri == null) {
+            r.put("cancelled", true);
+            call.resolve(r);
+            return;
+        }
+        String name = "Son du téléphone";
+        try {
+            Ringtone rt = RingtoneManager.getRingtone(getContext(), uri);
+            if (rt != null) name = rt.getTitle(getContext());
+        } catch (Exception ignored) {}
+        r.put("uri", uri.toString());
+        r.put("name", name);
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void pickFileSound(PluginCall call) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("audio/*");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(call, i, "fileSoundResult");
+        } catch (Exception e) {
+            call.reject("Sélecteur de fichiers indisponible");
+        }
+    }
+
+    @ActivityCallback
+    private void fileSoundResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        JSObject r = new JSObject();
+        Intent data = result.getData();
+        Uri uri = data != null ? data.getData() : null;
+        if (result.getResultCode() != android.app.Activity.RESULT_OK || uri == null) {
+            r.put("cancelled", true);
+            call.resolve(r);
+            return;
+        }
+        try {
+            getContext().getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {}
+        String name = "Fichier audio";
+        try (Cursor cur = getContext().getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (cur != null && cur.moveToFirst() && cur.getString(0) != null) name = cur.getString(0).replaceAll("\\.[^.]+$", "");
+        } catch (Exception ignored) {}
+        r.put("uri", uri.toString());
+        r.put("name", name);
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void previewSound(PluginCall call) {
+        releasePreview();
+        previewPlayer = AlarmService.createPlayer(getContext(), call.getString("uri", ""), false);
+        if (previewPlayer == null) {
+            call.reject("Son illisible");
+            return;
+        }
+        previewPlayer.setOnCompletionListener(mp -> releasePreview());
+        previewPlayer.start();
+        handler.postDelayed(stopPreviewTask, 10000);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void stopPreview(PluginCall call) {
+        releasePreview();
+        call.resolve();
+    }
+
+    private void releasePreview() {
+        handler.removeCallbacks(stopPreviewTask);
+        if (previewPlayer != null) {
+            try {
+                previewPlayer.stop();
+            } catch (Exception ignored) {}
+            try {
+                previewPlayer.release();
+            } catch (Exception ignored) {}
+            previewPlayer = null;
+        }
     }
 }

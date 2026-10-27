@@ -23,6 +23,7 @@ public final class AlarmStore {
     static final String KEY_SNOOZE = "snooze_min";
     static final String CH_RING = "alarmes_sonnerie_v1";
     static final String CH_SOFT = "alarmes_douces_v1";
+    static final String CH_ALARM = "alarmes_sonnerie_v2";
     static final String ACTION_FIRE = "io.github.chrissorbadere.alarmes.FIRE";
     static final String ACTION_STOP = "io.github.chrissorbadere.alarmes.STOP";
     static final String ACTION_SNOOZE = "io.github.chrissorbadere.alarmes.SNOOZE";
@@ -46,9 +47,22 @@ public final class AlarmStore {
         return prefs(c).getInt(KEY_SNOOZE, 10);
     }
 
+    static int snoozeNidOf(int nid) {
+        return SNOOZE_BASE + Math.abs(nid % 100000000);
+    }
+
     static void ensureChannels(Context c) {
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm.getNotificationChannel(CH_ALARM) == null) {
+            NotificationChannel ch = new NotificationChannel(CH_ALARM, "Alarmes", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("Écran d'alarme ; le son et la vibration sont gérés par l'appli");
+            ch.setSound(null, null);
+            ch.enableVibration(false);
+            ch.setBypassDnd(true);
+            ch.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+            nm.createNotificationChannel(ch);
+        }
         if (nm.getNotificationChannel(CH_RING) == null) {
             NotificationChannel ch = new NotificationChannel(CH_RING, "Alarmes (sonnerie)", NotificationManager.IMPORTANCE_HIGH);
             ch.setDescription("Alarmes qui sonnent jusqu'à ce que tu les arrêtes");

@@ -1,0 +1,6 @@
+{
+  "appId": "io.github.chrissorbadere.alarmes",
+  "appName": "Alarmes",
+  "webDir": "docs",
+  "android": { "allowMixedContent": false }
+}

@@ -114,7 +114,7 @@ public class AlarmReceiver extends BroadcastReceiver {
         full.putExtra("json", json);
         PendingIntent fullPi = PendingIntent.getActivity(c, nid, full, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        return new NotificationCompat.Builder(c, AlarmStore.CH_ALARM)
+        NotificationCompat.Builder nb = new NotificationCompat.Builder(c, AlarmStore.CH_ALARM)
             .setSmallIcon(R.drawable.ic_stat_alarm)
             .setContentTitle(title)
             .setContentText(body)
@@ -131,8 +131,15 @@ public class AlarmReceiver extends BroadcastReceiver {
             .setSilent(true)
             .addAction(0, "Snooze " + AlarmStore.snoozeMinutes(c) + " min", serviceAction(c, nid, AlarmService.ACTION_SNOOZE, json))
             .addAction(0, "Arrêter", serviceAction(c, nid, AlarmService.ACTION_STOP, null))
-            .setDeleteIntent(serviceAction(c, nid, AlarmService.ACTION_STOP, null))
-            .build();
+            .setDeleteIntent(serviceAction(c, nid, AlarmService.ACTION_STOP, null));
+        String alarmId = a.optString("alarmId", "");
+        if (a.optInt("photoCount", 0) > 0 && !alarmId.isEmpty()) {
+            try {
+                android.graphics.Bitmap bm = AlarmActivity.loadPhoto(AlarmActivity.photoFile(c, alarmId, 0), 256);
+                if (bm != null) nb.setLargeIcon(bm);
+            } catch (Exception ignored) {}
+        }
+        return nb.build();
     }
 
     /** Notification simple après une sonnerie sans réponse. */

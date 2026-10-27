@@ -18,6 +18,9 @@ import java.nio.charset.StandardCharsets;
 import android.util.Base64;
 import java.io.File;
 import java.io.FileOutputStream;
+import android.content.ContentValues;
+import android.os.Environment;
+import android.provider.MediaStore;
 import java.util.HashSet;
 import java.util.Set;
 import android.net.Uri;
@@ -602,6 +605,59 @@ public class AlarmNativePlugin extends Plugin {
             call.resolve();
         } catch (Exception ex) {
             call.reject("Impossible d'ouvrir l'événement");
+        }
+    }
+
+    // ---------- Sauvegarde directe dans Téléchargements/Alarmes ----------
+
+    @PluginMethod
+    public void saveToDownloads(PluginCall call) {
+        String name = call.getString("name", "alarmes-sauvegarde.json");
+        String content = call.getString("content", "");
+        if (Build.VERSION.SDK_INT < 29) {
+            call.reject("Android trop ancien pour l'enregistrement direct");
+            return;
+        }
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Alarmes");
+            Uri uri = getContext().getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) throw new Exception("création refusée");
+            try (OutputStream out = getContext().getContentResolver().openOutputStream(uri, "w")) {
+                if (out == null) throw new Exception("flux indisponible");
+                out.write(content.getBytes(StandardCharsets.UTF_8));
+            }
+            String finalName = name;
+            try (Cursor cur = getContext().getContentResolver().query(uri, new String[] { MediaStore.MediaColumns.DISPLAY_NAME }, null, null, null)) {
+                if (cur != null && cur.moveToFirst() && cur.getString(0) != null) finalName = cur.getString(0);
+            } catch (Exception ignored) {}
+            JSObject r = new JSObject();
+            r.put("uri", uri.toString());
+            r.put("name", finalName);
+            r.put("folder", "Téléchargements/Alarmes");
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Enregistrement impossible : " + e.getMessage());
+        }
+    }
+
+    /** Ouvre le menu de partage Android (Drive, Gmail, WhatsApp…) pour un fichier. */
+    @PluginMethod
+    public void shareFile(PluginCall call) {
+        String u = call.getString("uri", "");
+        try {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType(call.getString("mime", "application/json"));
+            send.putExtra(Intent.EXTRA_STREAM, Uri.parse(u));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(send, call.getString("title", "Envoyer la sauvegarde"));
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getContext().startActivity(chooser);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Partage impossible : " + e.getMessage());
         }
     }
 }

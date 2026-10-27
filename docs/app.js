@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -1438,7 +1438,13 @@ async function renderSettings(v) {
         : '<p class="note">État indisponible.</p>'}
       <div class="btns"><button class="btn primary" data-set="test">🔔 Tester une alarme dans 5 s</button></div>
       <p class="note">${lastSync.count} sonnerie(s) programmée(s) dans Android${lastSync.until ? `, jusqu'au ${fmtShort(lastSync.until)}` : ''}. Le programme est prolongé à chaque ouverture de l'appli : ouvre-la au moins une fois par mois.</p>
-      <p class="note">Sur realme : Paramètres › Batterie › (gestion par appli) › Alarmes › « Autoriser l’activité en arrière-plan » et « Démarrage automatique ».</p>
+    </div>
+    <h2>Réglages realme / ColorOS à vérifier</h2>
+    <div class="card note">
+      <div>• <b>Batterie</b> : Alarmes › « Autoriser l’activité en arrière-plan » et « Démarrage automatique ».</div>
+      <div style="margin-top:6px">• <b>Notifications</b> : catégorie « Alarmes » avec Bannière et Écran de verrouillage cochés.</div>
+      <div style="margin-top:6px">• <b>Accès spécial</b> (Paramètres › Applis) : « Afficher par-dessus d’autres applis » et, s’il existe, « Notifications plein écran » ou « Afficher sur l’écran de verrouillage ».</div>
+      <div class="btns"><button class="btn small" data-open="app">Ouvrir la fiche de l’appli</button></div>
     </div>` : `<div class="card"><b>Mode navigateur</b><p class="note">Ici, les alarmes ne sonnent que si la page est ouverte. Installe l'APK Android pour de vraies alarmes, même téléphone verrouillé.</p>
       ${'Notification' in window && Notification.permission !== 'granted' ? '<div class="btns"><button class="btn small" data-set="webnotif">Autoriser les notifications</button></div>' : ''}</div>`}
 

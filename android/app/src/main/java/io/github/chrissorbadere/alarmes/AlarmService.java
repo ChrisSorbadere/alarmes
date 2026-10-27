@@ -38,6 +38,7 @@ public class AlarmService extends Service {
     private MediaPlayer player;
     private Vibrator vibrator;
     private PowerManager.WakeLock wakeLock;
+    private PowerManager.WakeLock screenLock;
     private Runnable timeout;
     private int curNid = 0;
     private String curJson = null;
@@ -95,7 +96,10 @@ public class AlarmService extends Service {
             acquireWakeLock(minutes * 60000L + 30000L);
             startSound(a.optString("soundUri", ""));
             startVibration();
-            openAlarmScreen(nid, a);
+            wakeScreen();
+            final int fnid = nid;
+            final JSONObject fa = a;
+            handler.postDelayed(() -> openAlarmScreen(fnid, fa), 400);
             ringingNid = nid;
             if (timeout != null) handler.removeCallbacks(timeout);
             timeout = this::onTimeout;
@@ -127,7 +131,7 @@ public class AlarmService extends Service {
     /** Ouvre l'écran plein même si le téléphone est en cours d'utilisation
      *  (possible grâce à l'autorisation « Afficher par-dessus les autres applis »). */
     private void openAlarmScreen(int nid, JSONObject a) {
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) return;
+        if (curNid != nid) return;
         try {
             Intent i = new Intent(this, AlarmActivity.class);
             i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
@@ -268,7 +272,32 @@ public class AlarmService extends Service {
         } catch (Exception ignored) {}
     }
 
+    /** Allume l'écran au moment où l'alarme sonne (comme les réveils du téléphone). */
+    @SuppressWarnings("deprecation")
+    private void wakeScreen() {
+        releaseScreenLock();
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            screenLock = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                "Alarmes:ecran");
+            screenLock.acquire(60000L);
+        } catch (Exception e) {
+            Log.w(AlarmStore.TAG, "Allumage de l'écran impossible", e);
+        }
+    }
+
+    private void releaseScreenLock() {
+        if (screenLock != null) {
+            try {
+                if (screenLock.isHeld()) screenLock.release();
+            } catch (Exception ignored) {}
+            screenLock = null;
+        }
+    }
+
     private void releaseWakeLock() {
+        releaseScreenLock();
         if (wakeLock != null) {
             try {
                 if (wakeLock.isHeld()) wakeLock.release();

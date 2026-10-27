@@ -113,6 +113,8 @@ public class AlarmNativePlugin extends Plugin {
         a.put("soundUri", call.getString("soundUri", ""));
         a.put("durationMin", call.getInt("durationMin", 1));
         a.put("repeats", call.getInt("repeats", 0));
+        a.put("fadeSec", call.getInt("fadeSec", 0));
+        a.put("maxVol", call.getBoolean("maxVol", false));
         a.put("ringIndex", 0);
         a.put("alarmId", call.getString("alarmId", ""));
         a.put("photoCount", call.getInt("photoCount", 0));

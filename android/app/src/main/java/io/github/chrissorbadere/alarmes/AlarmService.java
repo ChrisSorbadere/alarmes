@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
 import android.net.Uri;
@@ -94,8 +95,15 @@ public class AlarmService extends Service {
             }
             int minutes = Math.max(1, Math.min(5, a.optInt("durationMin", 2)));
             acquireWakeLock(minutes * 60000L + 30000L);
-            startSound(a.optString("soundUri", ""));
-            startVibration();
+            int fadeSec = Math.max(0, Math.min(300, a.optInt("fadeSec", 0)));
+            if (a.optBoolean("maxVol", false)) raiseAlarmVolume();
+            startSound(a.optString("soundUri", ""), fadeSec);
+            if (fadeSec > 0) {
+                handler.removeCallbacks(vibrateTask);
+                handler.postDelayed(vibrateTask, fadeSec * 500L);
+            } else {
+                startVibration();
+            }
             wakeScreen();
             final int fnid = nid;
             final JSONObject fa = a;
@@ -214,6 +222,54 @@ public class AlarmService extends Service {
         return null;
     }
 
+    // ---------- Volume progressif et volume max ----------
+    private final Runnable vibrateTask = this::startVibration;
+    private Runnable fadeTask = null;
+    private int savedAlarmVolume = -1;
+
+    private void raiseAlarmVolume() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (savedAlarmVolume < 0) savedAlarmVolume = am.getStreamVolume(AudioManager.STREAM_ALARM);
+            am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0);
+        } catch (Exception e) {
+            Log.w(AlarmStore.TAG, "Volume max impossible", e);
+        }
+    }
+
+    private void restoreAlarmVolume() {
+        if (savedAlarmVolume < 0) return;
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            am.setStreamVolume(AudioManager.STREAM_ALARM, savedAlarmVolume, 0);
+        } catch (Exception ignored) {}
+        savedAlarmVolume = -1;
+    }
+
+    private void startSound(String soundUri, int fadeSec) {
+        startSound(soundUri);
+        if (player == null || fadeSec <= 0) return;
+        final long start = System.currentTimeMillis();
+        final long total = fadeSec * 1000L;
+        final MediaPlayer mp = player;
+        try {
+            mp.setVolume(0.02f, 0.02f);
+        } catch (Exception ignored) {}
+        fadeTask = new Runnable() {
+            @Override
+            public void run() {
+                if (player != mp) return;
+                float t = Math.min(1f, (System.currentTimeMillis() - start) / (float) total);
+                float v = Math.max(0.02f, t * t);
+                try {
+                    mp.setVolume(v, v);
+                } catch (Exception ignored) {}
+                if (t < 1f) handler.postDelayed(this, 250);
+            }
+        };
+        handler.postDelayed(fadeTask, 250);
+    }
+
     private void startSound(String soundUri) {
         stopSound();
         player = createPlayer(this, soundUri, true);
@@ -254,6 +310,10 @@ public class AlarmService extends Service {
     }
 
     private void stopSoundAndVibration() {
+        handler.removeCallbacks(vibrateTask);
+        if (fadeTask != null) handler.removeCallbacks(fadeTask);
+        fadeTask = null;
+        restoreAlarmVolume();
         stopSound();
         if (vibrator != null) {
             try {

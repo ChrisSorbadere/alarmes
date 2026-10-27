@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -44,9 +44,19 @@ function relDay(d) {
 
 function toast(msg, ms = 2600) {
   const t = $('#toast');
-  t.textContent = msg; t.hidden = false;
+  t.textContent = msg; t.hidden = false; t.onclick = null;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+/** Message avec un bouton (ex. « Annuler »). */
+function toastAction(msg, label, fn, ms = 5000) {
+  const t = $('#toast');
+  t.innerHTML = `<span>${esc(msg)}</span><button class="toast-btn">${esc(label)}</button>`;
+  t.hidden = false;
+  clearTimeout(toast._t);
+  t.onclick = e => { if (e.target.closest('.toast-btn')) { t.hidden = true; t.onclick = null; clearTimeout(toast._t); fn(); } };
+  toast._t = setTimeout(() => { t.hidden = true; t.onclick = null; }, ms);
 }
 
 /* ---------- Niveaux d'urgence ---------- */
@@ -451,7 +461,7 @@ function alarmCard(a, when) {
     a.mode === 'notif' ? '🔕' : '',
   ].join('');
   const sub = when ? `${capital(relDay(when))} · ${scheduleSummary(a)}` : scheduleSummary(a);
-  const picking = S.selMode && S.tab === 'list';
+  const picking = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   const picked = picking && S.sel.has(a.id);
   return `<div class="card alarm ${a.enabled ? '' : 'off'} ${picked ? 'picked' : ''}" style="--c:${colorOf(a)}" ${picking ? `data-pick="${a.id}"` : `data-open="${a.id}"`}>
       <div class="time">${esc(a.time)}</div>
@@ -547,7 +557,7 @@ function updateSelBar() {
     document.body.appendChild(bar);
     bar.addEventListener('click', e => { const b = e.target.closest('[data-sb]'); if (b && !b.disabled) selAction(b.dataset.sb); });
   }
-  const on = S.selMode && S.tab === 'list';
+  const on = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   document.body.classList.toggle('selmode', on);
   $('#fab').hidden = on || !(S.tab === 'list' || S.tab === 'calendar');
   bar.hidden = !on;
@@ -562,6 +572,33 @@ function updateSelBar() {
     </div>`;
 }
 
+function refreshView() {
+  if (S.tab === 'list') keepScroll(renderListBody);
+  else keepScroll(render);
+}
+
+function startSelectionWith(id) {
+  if (!id) return;
+  S.selMode = true; S.sel.add(id);
+  refreshView();
+}
+
+async function deleteWithUndo(id) {
+  const idx = S.alarms.findIndex(a => a.id === id);
+  if (idx < 0) return;
+  const [a] = S.alarms.splice(idx, 1);
+  S.sel.delete(id);
+  await saveAlarms();
+  refreshView();
+  const several = a.schedule.type !== 'dates' || a.schedule.dates.length > 1;
+  toastAction(`« ${(a.title || 'Alarme').slice(0, 40)} » supprimée${several ? ' (toutes ses dates)' : ''}`, 'Annuler', async () => {
+    S.alarms.splice(Math.min(idx, S.alarms.length), 0, a);
+    await saveAlarms();
+    refreshView();
+    toast('Alarme restaurée');
+  });
+}
+
 async function selAction(act) {
   const ids = new Set(S.sel);
   const n = ids.size;
@@ -569,7 +606,7 @@ async function selAction(act) {
   if (act === 'edit') { openBulkEditor(); return; }
   if (act === 'on' || act === 'off') {
     S.alarms.forEach(a => { if (ids.has(a.id)) a.enabled = act === 'on'; });
-    await saveAlarms(); keepScroll(renderListBody);
+    await saveAlarms(); refreshView();
     toast(`${n} alarme(s) ${act === 'on' ? 'activée(s)' : 'désactivée(s)'}`);
     return;
   }
@@ -832,8 +869,16 @@ function renderCalendarTab(v) {
     return { cls: s === S.calSel ? 'sel' : '', inner: `<span class="dots">${dots}</span>` };
   });
   const sel = (byDay[S.calSel] || []).sort((x, y) => x.d - y.d);
-  v.innerHTML = cal + `<h2>${capital(fmtDate(parseYmd(S.calSel)))}</h2>` +
-    (sel.length ? sel.map(x => alarmCard(x.a, x.d)).join('') : `<p class="note" style="padding:0 4px">Aucune alarme ce jour-là. Touche + pour en créer une à cette date.</p>`);
+  S.visibleIds = [...new Set(sel.map(x => x.a.id))];
+  const allIn = S.visibleIds.length && S.visibleIds.every(id => S.sel.has(id));
+  v.innerHTML = cal + `<div class="dayhead"><h2>${capital(fmtDate(parseYmd(S.calSel)))}</h2>
+      ${sel.length || S.selMode ? `<button class="btn small" data-sel="toggle">${S.selMode ? 'Terminer' : 'Sélectionner'}</button>` : ''}</div>` +
+    (S.selMode ? `<div class="chips">
+        ${sel.length ? `<button class="chip ${allIn ? 'on' : ''}" data-sel="all">Tout le jour (${S.visibleIds.length})</button>` : ''}
+        ${S.sel.size ? `<button class="chip" data-sel="none">Tout désélectionner</button>` : ''}
+      </div><p class="note" style="margin:0 4px 8px">Tu peux changer de jour : ce qui est coché le reste.</p>` : '') +
+    (sel.length ? sel.map(x => alarmCard(x.a, x.d)).join('') : `<p class="note" style="padding:0 4px">Aucune alarme ce jour-là.${S.selMode ? '' : ' Touche + pour en créer une à cette date.'}</p>`);
+  updateSelBar();
 }
 
 /* ---------- Éditeur ---------- */
@@ -1842,19 +1887,79 @@ function bindMain() {
   $$('.tabs button').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   $('#fab').addEventListener('click', () => openEditor(null, S.tab === 'calendar' ? S.calSel : null));
   const v = $('#view');
+  // Appui long = sélection ; glisser vers la gauche = suppression
+  let press = null, suppressClick = false;
+  const inCards = () => S.tab === 'list' || S.tab === 'calendar';
+  const noClick = () => { suppressClick = true; setTimeout(() => { suppressClick = false; }, 450); };
+  const resetCard = c => { c.style.transition = 'transform .18s ease'; c.style.transform = ''; setTimeout(() => { c.style.transition = ''; c.classList.remove('swiping'); }, 200); };
+  v.addEventListener('touchstart', e => {
+    if (!inCards() || e.touches.length !== 1) { press = null; return; }
+    const card = e.target.closest('.alarm');
+    if (!card || e.target.closest('[data-stop]')) { press = null; return; }
+    const t = e.touches[0];
+    const id = card.dataset.open || card.dataset.pick;
+    press = { card, id, x: t.clientX, y: t.clientY, dx: 0, swiping: false, long: false };
+    press.timer = setTimeout(() => {
+      if (!press || press.swiping) return;
+      press.long = true;
+      if (navigator.vibrate) navigator.vibrate(30);
+      startSelectionWith(id);
+    }, 550);
+  }, { passive: true });
+  v.addEventListener('touchmove', e => {
+    if (!press) return;
+    const t = e.touches[0];
+    const dx = t.clientX - press.x, dy = t.clientY - press.y;
+    if (!press.swiping) {
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) clearTimeout(press.timer);
+      if (S.selMode || press.long) return;
+      if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { press = null; return; }
+      if (dx > -14) return;
+      press.swiping = true;
+      press.card.classList.add('swiping');
+    }
+    press.dx = Math.min(0, dx);
+    press.card.style.transform = `translateX(${press.dx}px)`;
+  }, { passive: true });
+  const endPress = () => {
+    if (!press) return;
+    clearTimeout(press.timer);
+    const p = press; press = null;
+    if (p.long) { noClick(); return; }
+    if (!p.swiping) return;
+    noClick();
+    const w = p.card.offsetWidth;
+    if (p.dx < -Math.min(130, w * 0.35)) {
+      p.card.style.transition = 'transform .18s ease, opacity .18s ease';
+      p.card.style.transform = `translateX(${-w}px)`;
+      p.card.style.opacity = '0';
+      setTimeout(() => deleteWithUndo(p.id), 180);
+    } else resetCard(p.card);
+  };
+  v.addEventListener('touchend', endPress);
+  v.addEventListener('touchcancel', () => { if (press) { clearTimeout(press.timer); if (press.swiping) resetCard(press.card); press = null; } });
+  v.addEventListener('contextmenu', e => {
+    const card = e.target.closest('.alarm');
+    if (!card || !inCards()) return;
+    e.preventDefault();
+    if (!S.selMode || !S.sel.has(card.dataset.open || card.dataset.pick)) startSelectionWith(card.dataset.open || card.dataset.pick);
+    noClick();
+  });
+
   v.addEventListener('input', e => {
     if (e.target.id !== 'listSearch') return;
     S.search = e.target.value;
     renderListBody();
   });
   v.addEventListener('click', async e => {
+    if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
     const sb = e.target.closest('[data-sel]');
-    if (sb && S.tab === 'list') {
+    if (sb && (S.tab === 'list' || S.tab === 'calendar')) {
       const act = sb.dataset.sel;
       if (act === 'toggle') { S.selMode = !S.selMode; if (!S.selMode) S.sel.clear(); }
       if (act === 'all') S.visibleIds.forEach(id => S.sel.add(id));
       if (act === 'none') S.sel.clear();
-      keepScroll(renderListBody);
+      refreshView();
       return;
     }
     const pk = e.target.closest('[data-pick]');
@@ -1874,7 +1979,7 @@ function bindMain() {
         a.enabled = tg.checked; await saveAlarms();
         const n = a.enabled ? nextOcc(a) : null;
         toast(a.enabled ? (n ? `Activée · ${relDay(n)} ${fmtTime(n)}` : 'Activée (aucune date à venir)') : 'Désactivée');
-        if (S.tab !== 'calendar') keepScroll(renderListBody);
+        refreshView();
       }
       return;
     }

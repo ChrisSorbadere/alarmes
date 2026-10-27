@@ -272,3 +272,9 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .toast { display: flex; align-items: center; gap: 12px; }
 .toast[hidden] { display: none !important; }
 .toast-btn { border: 0; background: #fff; color: #111827; font-weight: 700; border-radius: 9px; padding: 6px 10px; flex: none; }
+
+.picker { z-index: 55; }
+.evrow { cursor: pointer; }
+.banner { background: #fef3c7; border-color: #fcd34d; color: #78350f; cursor: pointer; }
+.banner .note { color: #92400e; }
+[hidden] { display: none !important; }

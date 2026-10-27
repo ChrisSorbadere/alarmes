@@ -2,6 +2,7 @@ package io.github.chrissorbadere.alarmes;
 
 import android.Manifest;
 import android.app.NotificationManager;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
@@ -10,7 +11,10 @@ import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.CalendarContract;
 import android.provider.OpenableColumns;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import android.util.Base64;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -38,7 +42,10 @@ import org.json.JSONObject;
 
 @CapacitorPlugin(
     name = "AlarmNative",
-    permissions = { @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "notifications") }
+    permissions = {
+        @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "notifications"),
+        @Permission(strings = { Manifest.permission.READ_CALENDAR }, alias = "calendar")
+    }
 )
 public class AlarmNativePlugin extends Plugin {
     private String pendingOpen = null;
@@ -417,5 +424,184 @@ public class AlarmNativePlugin extends Plugin {
         JSObject r = new JSObject();
         r.put("removed", removed);
         call.resolve(r);
+    }
+
+    // ---------- Sauvegarde dans un fichier choisi ----------
+
+    @PluginMethod
+    public void saveFile(PluginCall call) {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(call.getString("mime", "application/json"));
+        i.putExtra(Intent.EXTRA_TITLE, call.getString("name", "alarmes.json"));
+        try {
+            startActivityForResult(call, i, "saveFileResult");
+        } catch (Exception e) {
+            call.reject("Enregistrement impossible");
+        }
+    }
+
+    @ActivityCallback
+    private void saveFileResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        JSObject r = new JSObject();
+        Intent data = result.getData();
+        Uri uri = data != null ? data.getData() : null;
+        if (result.getResultCode() != android.app.Activity.RESULT_OK || uri == null) {
+            r.put("cancelled", true);
+            call.resolve(r);
+            return;
+        }
+        byte[] bytes = call.getString("content", "").getBytes(StandardCharsets.UTF_8);
+        boolean ok = false;
+        String err = "";
+        for (String mode : new String[] { "wt", "w" }) {
+            try (OutputStream out = getContext().getContentResolver().openOutputStream(uri, mode)) {
+                if (out == null) throw new Exception("flux indisponible");
+                out.write(bytes);
+                ok = true;
+                break;
+            } catch (Exception e) {
+                err = e.getMessage();
+            }
+        }
+        if (!ok) {
+            call.reject("Écriture impossible : " + err);
+            return;
+        }
+        String name = "fichier";
+        try (Cursor cur = getContext().getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (cur != null && cur.moveToFirst() && cur.getString(0) != null) name = cur.getString(0);
+        } catch (Exception ignored) {}
+        r.put("name", name);
+        call.resolve(r);
+    }
+
+    // ---------- Agenda du téléphone (comptes Google synchronisés) ----------
+
+    private static final String[] INSTANCE_COLS = new String[] {
+        CalendarContract.Instances.EVENT_ID,
+        CalendarContract.Instances.BEGIN,
+        CalendarContract.Instances.END,
+        CalendarContract.Instances.TITLE,
+        CalendarContract.Instances.EVENT_LOCATION,
+        CalendarContract.Instances.DESCRIPTION,
+        CalendarContract.Instances.ALL_DAY,
+        CalendarContract.Instances.CALENDAR_DISPLAY_NAME,
+        CalendarContract.Instances.DISPLAY_COLOR,
+    };
+
+    private boolean calendarAllowed() {
+        return getPermissionState("calendar") == PermissionState.GRANTED;
+    }
+
+    private JSArray queryInstances(long from, long to, String selection, String[] args, int limit) {
+        JSArray out = new JSArray();
+        Uri.Builder b = CalendarContract.Instances.CONTENT_URI.buildUpon();
+        ContentUris.appendId(b, from);
+        ContentUris.appendId(b, to);
+        try (Cursor c = getContext().getContentResolver().query(b.build(), INSTANCE_COLS, selection, args, CalendarContract.Instances.BEGIN + " ASC")) {
+            if (c == null) return out;
+            int n = 0;
+            while (c.moveToNext() && n < limit) {
+                JSObject e = new JSObject();
+                e.put("id", String.valueOf(c.getLong(0)));
+                e.put("begin", c.getLong(1));
+                e.put("end", c.getLong(2));
+                e.put("title", c.getString(3) == null ? "" : c.getString(3));
+                e.put("location", c.getString(4) == null ? "" : c.getString(4));
+                e.put("description", c.getString(5) == null ? "" : c.getString(5));
+                e.put("allDay", c.getInt(6) == 1);
+                e.put("calendar", c.getString(7) == null ? "" : c.getString(7));
+                e.put("color", String.format("#%06X", 0xFFFFFF & c.getInt(8)));
+                out.put(e);
+                n++;
+            }
+        }
+        return out;
+    }
+
+    @PluginMethod
+    public void listEvents(PluginCall call) {
+        if (!calendarAllowed()) {
+            requestPermissionForAlias("calendar", call, "calendarPermCallback");
+            return;
+        }
+        doListEvents(call);
+    }
+
+    @PermissionCallback
+    private void calendarPermCallback(PluginCall call) {
+        if (!calendarAllowed()) {
+            call.reject("Accès à l'agenda refusé");
+            return;
+        }
+        doListEvents(call);
+    }
+
+    private void doListEvents(PluginCall call) {
+        int days = call.getInt("days", 90);
+        long now = System.currentTimeMillis();
+        try {
+            JSObject r = new JSObject();
+            r.put("events", queryInstances(now - 3600000L, now + days * 86400000L, null, null, 600));
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Lecture de l'agenda impossible : " + e.getMessage());
+        }
+    }
+
+    /** Retrouve les occurrences à venir des événements liés (pour suivre leurs déplacements). */
+    @PluginMethod
+    public void findEvents(PluginCall call) {
+        JSObject r = new JSObject();
+        if (!calendarAllowed()) {
+            r.put("allowed", false);
+            r.put("events", new JSArray());
+            call.resolve(r);
+            return;
+        }
+        JSArray ids = call.getArray("ids", new JSArray());
+        StringBuilder sel = new StringBuilder();
+        java.util.List<String> args = new java.util.ArrayList<>();
+        try {
+            for (int i = 0; i < ids.length(); i++) {
+                sel.append(sel.length() == 0 ? "" : ",").append("?");
+                args.add(ids.getString(i));
+            }
+        } catch (Exception ignored) {}
+        if (args.isEmpty()) {
+            r.put("allowed", true);
+            r.put("events", new JSArray());
+            call.resolve(r);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        try {
+            r.put("allowed", true);
+            r.put("events", queryInstances(now - 2 * 86400000L, now + 400 * 86400000L,
+                CalendarContract.Instances.EVENT_ID + " IN (" + sel + ")", args.toArray(new String[0]), 2000));
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Lecture de l'agenda impossible : " + e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void openEvent(PluginCall call) {
+        String id = call.getString("id", "");
+        try {
+            Uri uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, Long.parseLong(id));
+            Intent i = new Intent(Intent.ACTION_VIEW, uri);
+            Long b = call.getLong("begin");
+            Long e = call.getLong("end");
+            if (b != null) i.putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, (long) b);
+            if (e != null) i.putExtra(CalendarContract.EXTRA_EVENT_END_TIME, (long) e);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            call.resolve();
+        } catch (Exception ex) {
+            call.reject("Impossible d'ouvrir l'événement");
+        }
     }
 }

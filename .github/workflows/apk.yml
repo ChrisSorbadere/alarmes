@@ -42,7 +42,7 @@ jobs:
           chmod +x gradlew
           set -o pipefail
           if ! ./gradlew --no-daemon assembleRelease 2>&1 | tee build.log; then
-            grep -E "error:|e: |FAILURE|What went wrong|> |Exception" build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            grep -E -A2 "error:|What went wrong|Exception" build.log | grep -v "^> Task" | head -60 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           fi
           cp app/build/outputs/apk/release/app-release.apk ../Alarmes-${APP_VERSION}-b${{ github.run_number }}.apk

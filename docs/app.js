@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -1947,17 +1947,24 @@ function backupDue() {
 
 async function doBackup() {
   const settings = Object.assign({}, S.settings);
-  delete settings.lastBackup; delete settings.lastBackupName;
+  delete settings.lastBackup; delete settings.lastBackupName; delete settings.lastBackupUri;
   const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings };
   const content = JSON.stringify(data);
   const name = `alarmes-sauvegarde-${ymd(new Date())}.json`;
-  let savedName = name;
+  let savedName = name, savedUri = '';
   if (Native) {
     try {
-      const r = await Native.saveFile({ name, content, mime: 'application/json' });
-      if (!r || r.cancelled) return;
-      savedName = r.name || name;
-    } catch (e) { toast('Sauvegarde impossible : ' + (e.message || e)); return; }
+      const r = await Native.saveToDownloads({ name, content });
+      savedName = 'Téléchargements/Alarmes/' + (r.name || name);
+      savedUri = r.uri || '';
+    } catch (e) {
+      // Android ancien : repli sur le choix de l'emplacement
+      try {
+        const r = await Native.saveFile({ name, content, mime: 'application/json' });
+        if (!r || r.cancelled) return;
+        savedName = r.name || name;
+      } catch (e2) { toast('Sauvegarde impossible : ' + (e2.message || e2), 4000); return; }
+    }
   } else {
     const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
     const link = document.createElement('a'); link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
@@ -1965,9 +1972,17 @@ async function doBackup() {
   }
   S.settings.lastBackup = Date.now();
   S.settings.lastBackupName = savedName;
+  S.settings.lastBackupUri = savedUri;
   await DB.set('settings', S.settings);
-  if (S.tab === 'settings') keepScroll(render);
-  toast(`Sauvegarde enregistrée : ${S.alarms.length} alarme(s)`);
+  keepScroll(render);
+  if (savedUri) toastAction(`Sauvegardé (${S.alarms.length} alarmes) dans ${savedName}`, 'Envoyer vers Drive', shareBackup, 8000);
+  else toast(`Sauvegarde enregistrée : ${S.alarms.length} alarme(s)`);
+}
+
+async function shareBackup() {
+  if (!Native || !S.settings.lastBackupUri) { toast('Fais d’abord une sauvegarde'); return; }
+  try { await Native.shareFile({ uri: S.settings.lastBackupUri, mime: 'application/json', title: 'Envoyer la sauvegarde' }); }
+  catch (e) { toast('Envoi impossible : ' + (e.message || e)); }
 }
 
 async function doRestore(file, mode) {
@@ -2054,12 +2069,13 @@ async function renderSettings(v) {
     <div class="card">
       <p class="note" style="margin-top:0">${backupStatus()}</p>
       <div class="btns" style="margin-top:0"><button class="btn primary" data-set="backup">💾 Sauvegarder maintenant</button></div>
+      ${isNative && S.settings.lastBackupUri ? '<div class="btns"><button class="btn small" data-set="sharebackup">☁️ Envoyer la dernière sauvegarde vers Drive</button></div>' : ''}
       <div class="btns">
         <button class="btn small" data-set="restore">Restaurer (remplace tout)</button>
         <button class="btn small" data-set="merge">Ajouter depuis une sauvegarde</button>
       </div>
       <input type="file" id="restoreFile" accept=".json,application/json,text/plain" hidden>
-      <p class="note">Enregistre le fichier dans Drive pour le retrouver après un changement de téléphone ou une réinstallation. Photos et réglages compris.</p>
+      <p class="note">Le fichier est enregistré dans Téléchargements › Alarmes. Envoie-le vers Drive (choisis « Drive » dans le menu de partage) pour le retrouver après un changement de téléphone. Photos et réglages compris.</p>
     </div>
 
     <h2>À venir</h2>
@@ -2102,6 +2118,7 @@ function bindSettings() {
     }
     if (b.dataset.set === 'webnotif') { await Notification.requestPermission(); render(); }
     if (b.dataset.set === 'backup') { await doBackup(); return; }
+    if (b.dataset.set === 'sharebackup') { await shareBackup(); return; }
     if (b.dataset.set === 'restore' || b.dataset.set === 'merge') {
       S.restoreMode = b.dataset.set === 'restore' ? 'replace' : 'merge';
       const inp = $('#restoreFile'); inp.value = ''; inp.click();

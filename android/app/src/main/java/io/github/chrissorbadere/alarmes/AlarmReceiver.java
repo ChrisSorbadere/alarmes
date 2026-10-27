@@ -68,6 +68,7 @@ public class AlarmReceiver extends BroadcastReceiver {
 
     static void show(Context c, int nid, JSONObject a) {
         AlarmStore.ensureChannels(c);
+        NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
         String title = a.optString("title", "Alarme");
         String body = a.optString("body", "");
         String alarmId = a.optString("alarmId", null);

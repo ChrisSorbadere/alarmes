@@ -1,0 +1,11 @@
+{
+  "name": "alarmes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Alarmes sur mesure de Chris",
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/cli": "8.5.3",
+    "@capacitor/core": "8.5.3"
+  }
+}

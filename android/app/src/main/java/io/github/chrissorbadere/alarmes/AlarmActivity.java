@@ -3,8 +3,11 @@ package io.github.chrissorbadere.alarmes;
 import android.app.Activity;
 import android.app.KeyguardManager;
 import android.app.NotificationManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import androidx.core.content.ContextCompat;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -28,6 +31,14 @@ public class AlarmActivity extends Activity {
     private int nid;
     private String json;
     private JSONObject data;
+    private boolean registered = false;
+    private final BroadcastReceiver doneReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            int n = i.getIntExtra("nid", 0);
+            if (n == 0 || n == nid) finish();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,6 +53,30 @@ public class AlarmActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         load(getIntent());
         build();
+        ContextCompat.registerReceiver(this, doneReceiver, new IntentFilter(AlarmService.ACTION_DONE), ContextCompat.RECEIVER_NOT_EXPORTED);
+        registered = true;
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (registered) {
+            try {
+                unregisterReceiver(doneReceiver);
+            } catch (Exception ignored) {}
+        }
+        super.onDestroy();
+    }
+
+    private void sendToService(String action) {
+        Intent i = new Intent(this, AlarmService.class).setAction(action).putExtra("nid", nid);
+        if (json != null) i.putExtra("json", json);
+        try {
+            startService(i);
+        } catch (Exception e) {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.cancel(nid);
+            if (AlarmService.ACTION_SNOOZE.equals(action)) AlarmReceiver.snooze(this, nid, json, 0);
+        }
     }
 
     @Override
@@ -170,12 +205,11 @@ public class AlarmActivity extends Activity {
         root.addView(stop, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(72)));
 
         stop.setOnClickListener(v -> {
-            cancelNotif();
+            sendToService(AlarmService.ACTION_STOP);
             finish();
         });
         snooze.setOnClickListener(v -> {
-            cancelNotif();
-            AlarmReceiver.snooze(this, nid, json);
+            sendToService(AlarmService.ACTION_SNOOZE);
             finish();
         });
         details.setOnClickListener(v -> openDetails());
@@ -184,6 +218,7 @@ public class AlarmActivity extends Activity {
     }
 
     private void cancelNotif() {
+        sendToService(AlarmService.ACTION_STOP);
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         nm.cancel(nid);
     }

@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -93,7 +93,7 @@ const DB = {
 
 const S = {
   alarms: [],
-  settings: { snoozeMin: 10, defaultTime: '07:30', veilleTime: '20:00' },
+  settings: { snoozeMin: 10, defaultTime: '07:30', veilleTime: '20:00', ringMin: 2, repeats: 2, sound: null },
   tab: 'list',
   listFilter: 'all',
   calMonth: null,
@@ -221,6 +221,42 @@ function hashInt(str) {
   return (h >>> 0) % 99999989 + 1;
 }
 
+/* ---------- Sonnerie (son, durée, répétitions) ---------- */
+const DUR_CHOICES = [1, 2, 3, 4, 5];
+const REP_CHOICES = [0, 1, 2, 3, 4, 5];
+const repLabel = n => n === 0 ? 'aucune' : `${n} fois`;
+function effRing(a) {
+  const r = (a && a.ring) || {};
+  return {
+    sound: r.sound || S.settings.sound || null,
+    durationMin: r.durationMin || Number(S.settings.ringMin) || 2,
+    repeats: (r.repeats === 0 || r.repeats) ? r.repeats : Number(S.settings.repeats ?? 2),
+  };
+}
+const soundName = snd => snd ? snd.name : 'Son d’alarme du téléphone';
+function ringSummary(a) {
+  const e = effRing(a);
+  return `${soundName(e.sound)} · ${e.durationMin} min · répétitions : ${repLabel(e.repeats)}`;
+}
+async function pickSound(kind, current) {
+  if (!Native) { toast('Disponible dans l’appli Android'); return null; }
+  try {
+    const r = kind === 'file' ? await Native.pickFileSound() : await Native.pickSystemSound({ current: current ? current.uri : '' });
+    if (!r || r.cancelled || !r.uri) return null;
+    return { uri: r.uri, name: r.name || 'Son choisi', kind };
+  } catch (e) { toast('Choix du son impossible : ' + (e.message || e)); return null; }
+}
+let previewing = false;
+async function togglePreview(snd) {
+  if (!Native) { toast('Disponible dans l’appli Android'); return; }
+  try {
+    if (previewing) { await Native.stopPreview(); previewing = false; return; }
+    await Native.previewSound({ uri: snd ? snd.uri : '' });
+    previewing = true;
+    setTimeout(() => { previewing = false; }, 10000);
+  } catch (e) { toast('Son illisible'); previewing = false; }
+}
+
 function nativePayload() {
   const now = new Date();
   const to = addDays(now, HORIZON_DAYS);
@@ -238,6 +274,10 @@ function nativePayload() {
         mode: a.mode || 'alarm',
         alarmId: a.id,
         hasExtras: !!((a.photos && a.photos.length) || a.contact || a.place),
+        soundUri: effRing(a).sound ? effRing(a).sound.uri : '',
+        durationMin: effRing(a).durationMin,
+        repeats: effRing(a).repeats,
+        ringIndex: 0,
       });
     }
   }
@@ -275,8 +315,11 @@ function startBeep() {
 }
 function stopBeep() { clearInterval(beepTimer); beepTimer = null; }
 
-function showRing(a, when) {
+let ringTimer = null;
+function showRing(a, when, ringIndex = 0) {
   const r = $('#ring');
+  const eff = effRing(a);
+  clearTimeout(ringTimer);
   r.style.setProperty('--c', colorOf(a));
   r.innerHTML = `
     <div class="t">${fmtTime(when || new Date())}</div>
@@ -289,10 +332,18 @@ function showRing(a, when) {
     </div>
     <div class="btns"><button class="btn primary" data-r="stop">Arrêter</button></div>`;
   r.hidden = false;
-  startBeep();
+  stopBeep(); startBeep();
+  ringTimer = setTimeout(() => {
+    stopBeep(); r.hidden = true;
+    if (ringIndex < eff.repeats) {
+      toast(`Pas de réponse : nouvelle sonnerie dans ${S.settings.snoozeMin} min`, 4000);
+      ringTimer = setTimeout(() => showRing(a, new Date(), ringIndex + 1), S.settings.snoozeMin * 60000);
+    }
+  }, eff.durationMin * 60000);
   r.onclick = e => {
     const act = e.target.dataset.r;
     if (!act) return;
+    clearTimeout(ringTimer);
     stopBeep(); r.hidden = true;
     if (act === 'snooze') {
       const t = Date.now() + S.settings.snoozeMin * 60000;
@@ -530,6 +581,8 @@ function renderEditor() {
         </select></div>
     </div>
 
+    ${a.mode !== 'notif' ? editorRingHTML(a) : ''}
+
     <label class="f">Urgence (couleur)</label>
     <div class="levels">${LEVELS.map(l => `<button data-level="${l.id}" class="${lvl === l.id ? 'on' : ''}" style="--c:${l.color}">${l.label}</button>`).join('')}</div>
     <label class="custom-color"><input type="color" id="edColor" value="${colorOf(a)}"> Autre couleur${a.customColor ? ' (choisie)' : ''}</label>
@@ -587,6 +640,29 @@ function renderEditor() {
   updateEdNext();
 }
 
+function editorRingHTML(a) {
+  const r = a.ring || {};
+  const d = effRing({});
+  const own = !!r.sound;
+  return `<div class="card" style="margin-top:14px">
+      <b>Sonnerie</b>
+      <div class="attach" style="margin-top:8px"><span>🎵</span><div class="t"><b>${esc(soundName(r.sound || d.sound))}</b><small>${own ? 'son propre à cette alarme' : 'son par défaut (Réglages)'}</small></div>
+        ${isNative ? `<button class="btn small" data-ed="preview">▶</button>` : ''}</div>
+      ${isNative ? `<div class="btns" style="margin-top:0">
+        <button class="btn small" data-ed="sysSound">Sons du téléphone</button>
+        <button class="btn small" data-ed="fileSound">Fichier audio</button>
+        ${own ? '<button class="btn small" data-ed="defSound">Par défaut</button>' : ''}
+      </div>` : '<p class="note">Choix du son : dans l’appli Android.</p>'}
+      <div class="row">
+        <div><label class="f">Durée de sonnerie</label>
+          <select id="edDur"><option value="">Par défaut (${d.durationMin} min)</option>${DUR_CHOICES.map(n => `<option value="${n}" ${r.durationMin === n ? 'selected' : ''}>${n} min</option>`).join('')}</select></div>
+        <div><label class="f">Répétitions</label>
+          <select id="edRep"><option value="">Par défaut (${repLabel(d.repeats)})</option>${REP_CHOICES.map(n => `<option value="${n}" ${r.repeats === n ? 'selected' : ''}>${n === 0 ? 'Aucune' : n + ' fois'}</option>`).join('')}</select></div>
+      </div>
+      <p class="note">Sans réponse, l’alarme s’arrête après la durée choisie, puis resonne ${S.settings.snoozeMin} min plus tard, autant de fois que prévu.</p>
+    </div>`;
+}
+
 function readEditorFields() {
   if (!ED) return;
   const g = id => document.getElementById(id);
@@ -594,6 +670,11 @@ function readEditorFields() {
   ED.description = g('edDesc').value;
   ED.time = g('edTime').value || '07:30';
   ED.mode = g('edMode').value;
+  if (g('edDur')) {
+    ED.ring = ED.ring || {};
+    ED.ring.durationMin = g('edDur').value ? Number(g('edDur').value) : null;
+    ED.ring.repeats = g('edRep').value === '' ? null : Number(g('edRep').value);
+  }
   if (g('edStart')) ED.schedule.start = g('edStart').value || ymd(today0());
   if (g('edEnd')) ED.schedule.end = g('edEnd').value || '';
   const label = g('plLabel').value.trim(), url = g('plUrl').value.trim();
@@ -668,10 +749,18 @@ async function editorAction(act, el) {
     }
     case 'test':
       try {
-        await Native.test({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode });
+        const er = effRing(ED);
+        await Native.test({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 });
         toast('Sonnerie dans 5 secondes… tu peux verrouiller le téléphone.');
       } catch (e) { toast('Test impossible : ' + (e.message || e)); }
       return;
+    case 'sysSound': case 'fileSound': {
+      const snd = await pickSound(act === 'fileSound' ? 'file' : 'system', effRing(ED).sound);
+      if (snd) { ED.ring = Object.assign(ED.ring || {}, { sound: snd }); renderEditor(); toast('Son : ' + snd.name); }
+      return;
+    }
+    case 'defSound': ED.ring = Object.assign(ED.ring || {}, { sound: null }); renderEditor(); return;
+    case 'preview': togglePreview(effRing(ED).sound); return;
     case 'photo': $('#edPhotoInput').click(); return;
     case 'pickcontact':
       try {
@@ -785,6 +874,7 @@ function bindSheet() {
       refreshEditorCalendar();
     }
     if (e.target.id === 'edTime' || e.target.id === 'edStart' || e.target.id === 'edEnd') { readEditorFields(); refreshEditorCalendar(); }
+    if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
   s.addEventListener('change', async e => {
     if (!ED || e.target.id !== 'edPhotoInput') return;
@@ -816,6 +906,7 @@ function openDetail(id) {
       <div class="lvl">${esc(levelOf(a) && !a.customColor ? levelOf(a).label : 'Alarme')}${a.mode === 'notif' ? ' · rappel discret' : ''}</div>
       <h3>${esc(a.title || 'Alarme')}</h3>
       <div class="when">${a.time} · ${esc(scheduleSummary(a))}</div>
+      ${a.mode !== 'notif' ? `<div class="when" style="font-size:13px;opacity:.85;margin-top:4px">🎵 ${esc(ringSummary(a))}</div>` : ''}
     </div>
     <label class="f">Description</label>
     <div class="card desc">${esc(a.description || '(pas de description)')}</div>
@@ -1266,6 +1357,23 @@ function refreshDerived() {
 function keepScroll(fn) { const y = window.scrollY; fn(); window.scrollTo(0, y); }
 
 /* ---------- Réglages ---------- */
+const norm = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+function bulkMatches() {
+  const w = norm(S.bulkWord).trim();
+  if (w.length < 2) return [];
+  return S.alarms.filter(a => norm(a.title + ' ' + a.description + ' ' + (a.source ? a.source.name : '')).includes(w));
+}
+function bulkResultHTML() {
+  const w = (S.bulkWord || '').trim();
+  if (w.length < 2) return 'Tape au moins 2 lettres. Les majuscules et les accents ne comptent pas.';
+  const m = bulkMatches();
+  if (!m.length) return `Aucune alarme ne contient « ${esc(w)} ».`;
+  const list = m.slice(0, 8).map(a => `<div>• ${esc(a.title)}</div>`).join('');
+  return `<b>${m.length}</b> alarme${m.length > 1 ? 's' : ''} contien${m.length > 1 ? 'nent' : 't'} « ${esc(w)} » :
+    <div style="margin:6px 0">${list}${m.length > 8 ? `<div>… et ${m.length - 8} autres</div>` : ''}</div>
+    <div class="btns"><button class="btn danger" data-set="bulkdel">Supprimer ${m.length > 1 ? 'les ' + m.length + ' alarmes' : 'cette alarme'}</button></div>`;
+}
+
 async function renderSettings(v) {
   let st = null;
   if (Native) { try { st = await Native.status(); } catch (e) { st = null; } }
@@ -1285,16 +1393,40 @@ async function renderSettings(v) {
     </div>` : `<div class="card"><b>Mode navigateur</b><p class="note">Ici, les alarmes ne sonnent que si la page est ouverte. Installe l'APK Android pour de vraies alarmes, même téléphone verrouillé.</p>
       ${'Notification' in window && Notification.permission !== 'granted' ? '<div class="btns"><button class="btn small" data-set="webnotif">Autoriser les notifications</button></div>' : ''}</div>`}
 
+    <h2>Sonnerie par défaut</h2>
+    <div class="card">
+      <div class="attach"><span>🎵</span><div class="t"><b>${esc(soundName(S.settings.sound))}</b><small>utilisé par toutes les alarmes sans son propre</small></div>
+        ${isNative ? '<button class="btn small" data-set="preview">▶</button>' : ''}</div>
+      ${isNative ? `<div class="btns" style="margin-top:0">
+        <button class="btn small" data-set="sysSound">Sons du téléphone</button>
+        <button class="btn small" data-set="fileSound">Fichier audio</button>
+        ${S.settings.sound ? '<button class="btn small" data-set="defSound">Son d’alarme standard</button>' : ''}
+      </div>` : '<p class="note">Choix du son : dans l’appli Android.</p>'}
+      <div class="row">
+        <div><label class="f">Durée de sonnerie</label>
+          <select id="setDur">${DUR_CHOICES.map(n => `<option value="${n}" ${Number(S.settings.ringMin) === n ? 'selected' : ''}>${n} min</option>`).join('')}</select></div>
+        <div><label class="f">Répétitions</label>
+          <select id="setRep">${REP_CHOICES.map(n => `<option value="${n}" ${Number(S.settings.repeats) === n ? 'selected' : ''}>${n === 0 ? 'Aucune' : n + ' fois'}</option>`).join('')}</select></div>
+      </div>
+      <label class="f">Intervalle (snooze et répétitions)</label>
+      <select id="setSnooze">${[5, 10, 15, 20, 30, 60].map(n => `<option value="${n}" ${Number(S.settings.snoozeMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select>
+      <p class="note">Sans réponse, l’alarme sonne pendant la durée choisie, s’arrête, puis resonne après l’intervalle, autant de fois que prévu. Chaque alarme peut avoir ses propres réglages.</p>
+    </div>
+
+    <h2>Supprimer des alarmes par mot</h2>
+    <div class="card">
+      <input type="text" id="bulkWord" placeholder="Mot à chercher (titre ou description)" value="${esc(S.bulkWord || '')}" autocomplete="off">
+      <div id="bulkRes" class="note" style="margin-top:8px">${bulkResultHTML()}</div>
+    </div>
+
     <h2>Préférences</h2>
     <div class="card">
-      <label class="f" style="margin-top:0">Durée du snooze</label>
-      <select id="setSnooze">${[5, 10, 15, 20, 30, 60].map(n => `<option value="${n}" ${Number(S.settings.snoozeMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select>
       <label class="f">Heure par défaut d'une nouvelle alarme</label>
       <input type="time" id="setDefTime" value="${S.settings.defaultTime}">
     </div>
 
-    <h2>À venir (v2)</h2>
-    <div class="card note">Lien avec Google Agenda (accrocher une alarme à un événement), lecture directe du fichier sur Drive, sauvegarde et restauration.</div>
+    <h2>À venir</h2>
+    <div class="card note">Sauvegarde et restauration des alarmes · lien avec Google Agenda (accrocher une alarme à un événement) · lecture directe d’un fichier sur Drive.</div>
     <p class="note" style="text-align:center;margin-top:20px">Alarmes v${VERSION} · ${S.alarms.length} alarme(s)</p>`;
 }
 
@@ -1306,8 +1438,28 @@ function bindSettings() {
     if (!b) return;
     if (b.dataset.open && Native) { await Native.openSettings({ which: b.dataset.open }); return; }
     if (b.dataset.set === 'notif' && Native) { await Native.requestNotifications(); render(); return; }
+    if (b.dataset.set === 'bulkdel') {
+      const m = bulkMatches();
+      if (!m.length) return;
+      if (!confirm(`Supprimer définitivement ${m.length} alarme(s) contenant « ${S.bulkWord.trim()} » ?`)) return;
+      const ids = new Set(m.map(a => a.id));
+      S.alarms = S.alarms.filter(a => !ids.has(a.id));
+      await saveAlarms();
+      S.bulkWord = '';
+      render();
+      toast(`${ids.size} alarme(s) supprimée(s)`);
+      return;
+    }
+    if (b.dataset.set === 'sysSound' || b.dataset.set === 'fileSound') {
+      const snd = await pickSound(b.dataset.set === 'fileSound' ? 'file' : 'system', S.settings.sound);
+      if (snd) { S.settings.sound = snd; await saveSettings(); keepScroll(render); toast('Son par défaut : ' + snd.name); }
+      return;
+    }
+    if (b.dataset.set === 'defSound') { S.settings.sound = null; await saveSettings(); keepScroll(render); return; }
+    if (b.dataset.set === 'preview') { togglePreview(S.settings.sound); return; }
     if (b.dataset.set === 'test' && Native) {
-      await Native.test({ seconds: 5 });
+      const er = effRing({});
+      await Native.test({ seconds: 5, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 });
       toast('Sonnerie dans 5 secondes… verrouille le téléphone pour voir l’écran plein.');
       return;
     }
@@ -1317,6 +1469,13 @@ function bindSettings() {
     if (S.tab !== 'settings') return;
     if (e.target.id === 'setSnooze') { S.settings.snoozeMin = Number(e.target.value); await saveSettings(); toast('Snooze : ' + e.target.value + ' min'); }
     if (e.target.id === 'setDefTime') { S.settings.defaultTime = e.target.value || '07:30'; await saveSettings(); }
+    if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
+    if (e.target.id === 'setRep') { S.settings.repeats = Number(e.target.value); await saveSettings(); toast('Répétitions : ' + repLabel(Number(e.target.value))); }
+  });
+  v.addEventListener('input', e => {
+    if (S.tab !== 'settings' || e.target.id !== 'bulkWord') return;
+    S.bulkWord = e.target.value;
+    $('#bulkRes').innerHTML = bulkResultHTML();
   });
 }
 

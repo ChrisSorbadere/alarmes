@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.2.2';
+const VERSION = '1.3.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -95,6 +95,10 @@ const S = {
   alarms: [],
   settings: { snoozeMin: 10, defaultTime: '07:30', veilleTime: '20:00', ringMin: 2, repeats: 2, sound: null },
   tab: 'list',
+  search: '',
+  selMode: false,
+  sel: new Set(),
+  visibleIds: [],
   listFilter: 'all',
   calMonth: null,
   calSel: null,
@@ -421,11 +425,12 @@ function webTick() {
 /* ---------- Navigation ---------- */
 const TITLES = { list: 'Alarmes', calendar: 'Calendrier', import: 'Importer', settings: 'Réglages' };
 function go(tab) {
+  if (tab !== S.tab) { S.selMode = false; S.sel.clear(); }
   S.tab = tab;
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $('#viewTitle').textContent = TITLES[tab];
-  $('#fab').hidden = !(tab === 'list' || tab === 'calendar');
   render();
+  updateSelBar();
   window.scrollTo(0, 0);
 }
 function render() {
@@ -446,28 +451,53 @@ function alarmCard(a, when) {
     a.mode === 'notif' ? '🔕' : '',
   ].join('');
   const sub = when ? `${capital(relDay(when))} · ${scheduleSummary(a)}` : scheduleSummary(a);
-  return `<div class="card alarm ${a.enabled ? '' : 'off'}" style="--c:${colorOf(a)}" data-open="${a.id}">
+  const picking = S.selMode && S.tab === 'list';
+  const picked = picking && S.sel.has(a.id);
+  return `<div class="card alarm ${a.enabled ? '' : 'off'} ${picked ? 'picked' : ''}" style="--c:${colorOf(a)}" ${picking ? `data-pick="${a.id}"` : `data-open="${a.id}"`}>
       <div class="time">${esc(a.time)}</div>
       <div class="info">
         <div class="title">${esc(a.title || 'Sans titre')}</div>
         <div class="sub">${esc(sub)}</div>
         ${clips ? `<div class="clips">${clips}</div>` : ''}
       </div>
-      <label class="switch" data-stop="1"><input type="checkbox" data-toggle="${a.id}" ${a.enabled ? 'checked' : ''}><span></span></label>
+      ${picking ? `<span class="selbox">${picked ? '✓' : ''}</span>` : `<label class="switch" data-stop="1"><input type="checkbox" data-toggle="${a.id}" ${a.enabled ? 'checked' : ''}><span></span></label>`}
     </div>`;
+}
+
+function listMatches(a) {
+  const w = norm(S.search).trim();
+  return !w || norm(a.title + ' ' + a.description + ' ' + (a.source ? a.source.name : '')).includes(w);
 }
 
 function renderList(v) {
   if (!S.alarms.length) {
+    S.selMode = false; S.sel.clear();
     v.innerHTML = `<div class="empty"><b>Aucune alarme</b>Touche + pour en créer une, ou importe un fichier de dates dans l'onglet Importer.</div>`;
+    updateSelBar();
     return;
   }
+  if (!$('#listSearch', v)) {
+    v.innerHTML = `<div class="searchbar">
+        <input type="search" id="listSearch" placeholder="🔍 Rechercher un mot…" autocomplete="off">
+        <button class="btn small" data-sel="toggle" id="selToggle"></button>
+      </div><div id="listBody"></div>`;
+    $('#listSearch', v).value = S.search;
+  }
+  renderListBody();
+}
+
+function renderListBody() {
+  const body = $('#listBody');
+  if (!body) return;
+  $('#selToggle').textContent = S.selMode ? 'Terminer' : 'Sélectionner';
   const now = new Date();
   const withNext = S.alarms.map(a => ({ a, n: a.enabled ? nextOcc(a, now) : null }));
   let items = withNext;
   if (S.listFilter === 'week') items = items.filter(x => x.n && x.n - now < 7 * 86400000);
   if (S.listFilter === 'import') items = items.filter(x => x.a.source);
   if (S.listFilter === 'manual') items = items.filter(x => !x.a.source);
+  items = items.filter(x => listMatches(x.a));
+  S.visibleIds = items.map(x => x.a.id);
 
   const groups = { "Aujourd'hui": [], 'Demain': [], 'Cette semaine': [], 'Plus tard': [], 'Désactivées ou terminées': [] };
   const t0 = today0();
@@ -486,6 +516,14 @@ function renderList(v) {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  if (S.search.trim()) html += `<p class="note" style="margin:0 4px 8px">${items.length} résultat${items.length > 1 ? 's' : ''} pour « ${esc(S.search.trim())} »</p>`;
+  if (S.selMode) {
+    const allIn = items.length && items.every(x => S.sel.has(x.a.id));
+    html += `<div class="chips">
+      <button class="chip ${allIn ? 'on' : ''}" data-sel="all">Tout sélectionner (${items.length})</button>
+      ${S.sel.size ? `<button class="chip" data-sel="none">Tout désélectionner</button>` : ''}
+    </div>`;
+  }
   let any = false;
   for (const [name, arr] of Object.entries(groups)) {
     if (!arr.length) continue;
@@ -495,8 +533,264 @@ function renderList(v) {
     html += `<h2>${name} · ${arr.length}</h2>` + shown.map(x => alarmCard(x.a, x.n)).join('');
     if (shown.length < arr.length) html += `<p class="note">… et ${arr.length - shown.length} autres (voir le calendrier).</p>`;
   }
-  if (!any) html += `<div class="empty">Rien dans ce filtre.</div>`;
-  v.innerHTML = html;
+  if (!any) html += `<div class="empty">${S.search.trim() ? 'Aucune alarme ne contient ce mot.' : 'Rien dans ce filtre.'}</div>`;
+  body.innerHTML = html;
+  updateSelBar();
+}
+
+/* ---------- Sélection multiple ---------- */
+function updateSelBar() {
+  let bar = $('#selBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'selBar'; bar.className = 'selbar'; bar.hidden = true;
+    document.body.appendChild(bar);
+    bar.addEventListener('click', e => { const b = e.target.closest('[data-sb]'); if (b && !b.disabled) selAction(b.dataset.sb); });
+  }
+  const on = S.selMode && S.tab === 'list';
+  document.body.classList.toggle('selmode', on);
+  $('#fab').hidden = on || !(S.tab === 'list' || S.tab === 'calendar');
+  bar.hidden = !on;
+  if (!on) return;
+  const n = S.sel.size, dis = n ? '' : 'disabled';
+  bar.innerHTML = `<div class="selcount"><b>${n}</b> sélectionnée${n > 1 ? 's' : ''}</div>
+    <div class="selbtns">
+      <button class="btn small primary" data-sb="edit" ${dis}>Modifier</button>
+      <button class="btn small" data-sb="on" ${dis}>Activer</button>
+      <button class="btn small" data-sb="off" ${dis}>Désactiver</button>
+      <button class="btn small danger" data-sb="del" ${dis}>Supprimer</button>
+    </div>`;
+}
+
+async function selAction(act) {
+  const ids = new Set(S.sel);
+  const n = ids.size;
+  if (!n) return;
+  if (act === 'edit') { openBulkEditor(); return; }
+  if (act === 'on' || act === 'off') {
+    S.alarms.forEach(a => { if (ids.has(a.id)) a.enabled = act === 'on'; });
+    await saveAlarms(); keepScroll(renderListBody);
+    toast(`${n} alarme(s) ${act === 'on' ? 'activée(s)' : 'désactivée(s)'}`);
+    return;
+  }
+  if (act === 'del') {
+    if (!confirm(`Supprimer définitivement ${n} alarme(s) ?`)) return;
+    S.alarms = S.alarms.filter(a => !ids.has(a.id));
+    S.sel.clear(); S.selMode = false;
+    await saveAlarms(); render();
+    toast(`${n} alarme(s) supprimée(s)`);
+  }
+}
+
+let BE = null; // modification groupée en cours
+
+function openBulkEditor() {
+  ED = null;
+  BE = {
+    ids: [...S.sel],
+    timeMode: 'keep', timeValue: S.settings.defaultTime || '07:30', timeShift: '',
+    dayShift: '', mode: '', level: '', color: '',
+    soundMode: 'keep', sound: null, dur: '', rep: '',
+    placeMode: 'keep', placeLabel: '', placeUrl: '',
+    contactMode: 'keep', ctName: '', ctPhone: '', ctEmail: '',
+    addPhotos: [], clearPhotos: false, appendDesc: '', find: '', replace: '',
+  };
+  renderBulk();
+  showSheet();
+}
+
+function readBulkFields() {
+  if (!BE) return;
+  const g = id => document.getElementById(id);
+  const val = id => (g(id) ? g(id).value : undefined);
+  if (g('beTime')) BE.timeValue = val('beTime') || BE.timeValue;
+  if (g('beShift')) BE.timeShift = val('beShift');
+  BE.dayShift = val('beDays') ?? BE.dayShift;
+  BE.mode = val('beMode') ?? BE.mode;
+  BE.dur = val('beDur') ?? BE.dur;
+  BE.rep = val('beRep') ?? BE.rep;
+  if (g('bePlLabel')) { BE.placeLabel = val('bePlLabel').trim(); BE.placeUrl = val('bePlUrl').trim(); }
+  if (g('beCtName')) { BE.ctName = val('beCtName').trim(); BE.ctPhone = val('beCtPhone').trim(); BE.ctEmail = val('beCtEmail').trim(); }
+  if (g('beClearPh')) BE.clearPhotos = g('beClearPh').checked;
+  BE.appendDesc = val('beDesc') ?? BE.appendDesc;
+  BE.find = val('beFind') ?? BE.find;
+  BE.replace = val('beRepl') ?? BE.replace;
+}
+
+function renderBulk() {
+  const b = BE, n = b.ids.length;
+  const seg = (name, cur, opts) => `<div class="seg">${opts.map(([v, l]) => `<button data-be-${name}="${v}" class="${cur === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const s = $('#sheet');
+  s.innerHTML = `
+  <div class="sheet-head">
+    <button data-be="close">✕</button>
+    <h3>Modifier ${n} alarme${n > 1 ? 's' : ''}</h3>
+    <button class="save" data-be="apply">Appliquer</button>
+  </div>
+  <div class="sheet-body">
+    <p class="note">Seuls les réglages que tu changes sont appliqués. Le reste de chaque alarme ne bouge pas.</p>
+
+    <label class="f">Heure</label>
+    ${seg('time', b.timeMode, [['keep', 'Ne pas changer'], ['set', 'Fixer à'], ['shift', 'Décaler']])}
+    ${b.timeMode === 'set' ? `<input type="time" id="beTime" value="${esc(b.timeValue)}" style="margin-top:8px">` : ''}
+    ${b.timeMode === 'shift' ? `<div class="row" style="margin-top:8px"><input type="number" id="beShift" value="${esc(b.timeShift)}" placeholder="ex. -30"><span style="flex:none">minutes</span></div><p class="note">Négatif = plus tôt. Passer minuit change aussi le jour.</p>` : ''}
+
+    <label class="f">Décaler les dates</label>
+    <div class="row"><input type="number" id="beDays" value="${esc(b.dayShift)}" placeholder="0"><span style="flex:none">jours</span></div>
+    <p class="note">Négatif = plus tôt. Dates choisies, exceptions et périodes sont décalées ; les jours de la semaine aussi. Les répétitions « jours du mois » ne bougent pas.</p>
+
+    <label class="f">Type</label>
+    <select id="beMode">
+      <option value="">Ne pas changer</option>
+      <option value="alarm" ${b.mode === 'alarm' ? 'selected' : ''}>Sonnerie d'alarme</option>
+      <option value="notif" ${b.mode === 'notif' ? 'selected' : ''}>Rappel discret</option>
+    </select>
+
+    <label class="f">Urgence (couleur)</label>
+    <div class="chips" style="margin-bottom:6px"><button class="chip ${b.level === '' ? 'on' : ''}" data-be-level="">Ne pas changer</button></div>
+    <div class="levels">${LEVELS.map(l => `<button data-be-level="${l.id}" class="${b.level === l.id ? 'on' : ''}" style="--c:${l.color}">${l.label}</button>`).join('')}</div>
+    <label class="custom-color"><input type="color" id="beColor" value="${b.color || '#7c3aed'}"> Autre couleur${b.level === 'custom' ? ' (choisie)' : ''}</label>
+
+    <div class="card" style="margin-top:14px">
+      <b>Sonnerie</b>
+      <label class="f">Son</label>
+      ${seg('snd', b.soundMode, [['keep', 'Ne pas changer'], ['default', 'Par défaut'], ['set', 'Choisir']])}
+      ${b.soundMode === 'set' ? `<div class="attach" style="margin-top:8px"><span>🎵</span><div class="t"><b>${esc(b.sound ? b.sound.name : 'Aucun son choisi')}</b></div>${isNative && b.sound ? '<button class="btn small" data-be="preview">▶</button>' : ''}</div>
+        ${isNative ? `<div class="btns" style="margin-top:0"><button class="btn small" data-be="sysSound">Sons du téléphone</button><button class="btn small" data-be="fileSound">Fichier audio</button></div>` : '<p class="note">Choix du son : dans l’appli Android.</p>'}` : ''}
+      <div class="row">
+        <div><label class="f">Durée</label>
+          <select id="beDur"><option value="">Ne pas changer</option><option value="def" ${b.dur === 'def' ? 'selected' : ''}>Par défaut</option>${DUR_CHOICES.map(x => `<option value="${x}" ${b.dur === String(x) ? 'selected' : ''}>${x} min</option>`).join('')}</select></div>
+        <div><label class="f">Répétitions</label>
+          <select id="beRep"><option value="">Ne pas changer</option><option value="def" ${b.rep === 'def' ? 'selected' : ''}>Par défaut</option>${REP_CHOICES.map(x => `<option value="${x}" ${b.rep === String(x) ? 'selected' : ''}>${x === 0 ? 'Aucune' : x + ' fois'}</option>`).join('')}</select></div>
+      </div>
+    </div>
+
+    <label class="f">Lieu</label>
+    ${seg('pl', b.placeMode, [['keep', 'Ne pas changer'], ['set', 'Définir'], ['remove', 'Retirer']])}
+    ${b.placeMode === 'set' ? `<input type="text" id="bePlLabel" placeholder="Nom du lieu ou adresse" value="${esc(b.placeLabel)}" style="margin-top:8px">
+      <input type="url" id="bePlUrl" placeholder="Lien Google Maps (facultatif)" value="${esc(b.placeUrl)}" style="margin-top:8px">` : ''}
+
+    <label class="f">Contact</label>
+    ${seg('ct', b.contactMode, [['keep', 'Ne pas changer'], ['set', 'Définir'], ['remove', 'Retirer']])}
+    ${b.contactMode === 'set' ? `${isNative ? '<div class="btns"><button class="btn small" data-be="pickcontact">Choisir dans le répertoire</button></div>' : ''}
+      <input type="text" id="beCtName" placeholder="Nom" value="${esc(b.ctName)}" style="margin-top:8px">
+      <input type="tel" id="beCtPhone" placeholder="Téléphone" value="${esc(b.ctPhone)}" style="margin-top:8px">
+      <input type="email" id="beCtEmail" placeholder="E-mail" value="${esc(b.ctEmail)}" style="margin-top:8px">` : ''}
+
+    <label class="f">Photos à ajouter</label>
+    <div class="photos">
+      ${b.addPhotos.map((p, i) => `<div class="ph"><img src="${p}" alt=""><button class="x" data-be-delph="${i}">✕</button></div>`).join('')}
+      <button class="add" data-be="photo">+</button>
+    </div>
+    <input type="file" id="bePhotoInput" accept="image/*" multiple hidden>
+    <label class="custom-color"><input type="checkbox" id="beClearPh" ${b.clearPhotos ? 'checked' : ''} style="width:20px;height:20px"> Retirer d’abord les photos existantes</label>
+
+    <label class="f">Ajouter à la fin de la description</label>
+    <textarea id="beDesc" placeholder="Texte ajouté sur une nouvelle ligne" style="min-height:70px">${esc(b.appendDesc)}</textarea>
+
+    <label class="f">Rechercher-remplacer dans les titres</label>
+    <div class="row"><input type="text" id="beFind" placeholder="Rechercher" value="${esc(b.find)}"><input type="text" id="beRepl" placeholder="Remplacer par" value="${esc(b.replace)}"></div>
+    <p class="note">Majuscules ignorées. Laisse « Remplacer par » vide pour effacer le mot.</p>
+
+    <div class="btns" style="margin-top:22px"><button class="btn primary" data-be="apply">Appliquer à ${n} alarme${n > 1 ? 's' : ''}</button></div>
+  </div>`;
+}
+
+function shiftSchedule(sc, n) {
+  const f = d => ymd(addDays(parseYmd(d), n));
+  sc.dates = (sc.dates || []).map(f).sort();
+  sc.except = (sc.except || []).map(f);
+  sc.extra = (sc.extra || []).map(f);
+  if (sc.type !== 'dates') {
+    if (sc.start) sc.start = f(sc.start);
+    if (sc.end) sc.end = f(sc.end);
+    if (sc.type === 'weekly') sc.weekdays = sc.weekdays.map(w => (((w + n) % 7) + 7) % 7);
+  }
+}
+
+async function applyBulk() {
+  readBulkFields();
+  const b = BE;
+  const ids = new Set(b.ids);
+  const shiftMin = b.timeMode === 'shift' ? Math.round(Number(b.timeShift) || 0) : 0;
+  const days = Math.round(Number(b.dayShift) || 0);
+  const findRe = b.find.trim() ? new RegExp(b.find.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : null;
+  const hasChange = (b.timeMode === 'set') || shiftMin || days || b.mode || b.level || b.soundMode !== 'keep' || b.dur || b.rep
+    || b.placeMode !== 'keep' || b.contactMode !== 'keep' || b.addPhotos.length || b.clearPhotos || b.appendDesc.trim() || findRe;
+  if (!hasChange) { toast('Aucun changement choisi'); return; }
+  if (b.soundMode === 'set' && !b.sound) { toast('Choisis un son, ou mets « Ne pas changer »'); return; }
+  if (b.placeMode === 'set' && !b.placeLabel && !b.placeUrl) { toast('Indique le lieu, ou mets « Ne pas changer »'); return; }
+  if (b.contactMode === 'set' && !b.ctName && !b.ctPhone && !b.ctEmail) { toast('Indique le contact, ou mets « Ne pas changer »'); return; }
+  if (!confirm(`Appliquer ces changements à ${ids.size} alarme(s) ?`)) return;
+
+  for (const a of S.alarms) {
+    if (!ids.has(a.id)) continue;
+    let dayShift = days;
+    if (b.timeMode === 'set' && b.timeValue) a.time = b.timeValue;
+    if (shiftMin) {
+      const [h, m] = (a.time || '00:00').split(':').map(Number);
+      let t = h * 60 + m + shiftMin;
+      dayShift += Math.floor(t / 1440);
+      t = ((t % 1440) + 1440) % 1440;
+      a.time = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+    }
+    if (dayShift) shiftSchedule(a.schedule, dayShift);
+    if (b.mode) a.mode = b.mode;
+    if (b.level === 'custom') { a.color = b.color; a.customColor = true; }
+    else if (b.level) { a.level = b.level; a.customColor = false; a.color = ''; }
+    if (b.soundMode !== 'keep' || b.dur || b.rep) a.ring = a.ring || {};
+    if (b.soundMode === 'default') a.ring.sound = null;
+    if (b.soundMode === 'set') a.ring.sound = b.sound;
+    if (b.dur) a.ring.durationMin = b.dur === 'def' ? null : Number(b.dur);
+    if (b.rep) a.ring.repeats = b.rep === 'def' ? null : Number(b.rep);
+    if (b.placeMode === 'remove') a.place = null;
+    if (b.placeMode === 'set') a.place = { label: b.placeLabel, url: b.placeUrl };
+    if (b.contactMode === 'remove') a.contact = null;
+    if (b.contactMode === 'set') a.contact = { name: b.ctName, phone: b.ctPhone, email: b.ctEmail };
+    if (b.clearPhotos) a.photos = [];
+    if (b.addPhotos.length) a.photos = [...(a.photos || []), ...b.addPhotos];
+    if (b.appendDesc.trim()) a.description = (a.description ? a.description.replace(/\s+$/, '') + '\n\n' : '') + b.appendDesc.trim();
+    if (findRe) a.title = a.title.replace(findRe, b.replace).replace(/\s{2,}/g, ' ').trim() || a.title;
+    a.updatedAt = Date.now();
+  }
+  const n = ids.size;
+  closeSheet();
+  S.sel.clear(); S.selMode = false;
+  await saveAlarms();
+  render();
+  toast(`${n} alarme(s) modifiée(s)`);
+}
+
+async function bulkClick(e) {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const d = btn.dataset;
+  if (d.be === 'close') { closeSheet(); return; }
+  readBulkFields();
+  const y = $('#sheet').scrollTop;
+  const rerender = () => { renderBulk(); $('#sheet').scrollTop = y; };
+  if (d.beTime) { BE.timeMode = d.beTime; return rerender(); }
+  if (d.beSnd) { BE.soundMode = d.beSnd; return rerender(); }
+  if (d.bePl) { BE.placeMode = d.bePl; return rerender(); }
+  if (d.beCt) { BE.contactMode = d.beCt; return rerender(); }
+  if (d.beLevel !== undefined) { BE.level = d.beLevel; return rerender(); }
+  if (d.beDelph !== undefined) { BE.addPhotos.splice(Number(d.beDelph), 1); return rerender(); }
+  switch (d.be) {
+    case 'apply': return applyBulk();
+    case 'photo': $('#bePhotoInput').click(); return;
+    case 'preview': return togglePreview(BE.sound);
+    case 'sysSound': case 'fileSound': {
+      const snd = await pickSound(d.be === 'fileSound' ? 'file' : 'system', BE.sound);
+      if (snd) { BE.sound = snd; rerender(); }
+      return;
+    }
+    case 'pickcontact':
+      try {
+        const r = await Native.pickContact();
+        if (r && !r.cancelled) { BE.ctName = r.name || ''; BE.ctPhone = r.phone || ''; rerender(); }
+      } catch (err) { toast('Contact non récupéré'); }
+      return;
+  }
 }
 
 /* ---------- Composant calendrier ---------- */
@@ -576,7 +870,7 @@ function showSheet() {
 function closeSheet(fromPop) {
   const s = $('#sheet');
   const wasOpen = !s.hidden;
-  s.hidden = true; s.innerHTML = ''; ED = null;
+  s.hidden = true; s.innerHTML = ''; ED = null; BE = null;
   document.body.classList.remove('lock');
   if (wasOpen && !fromPop && history.state && history.state.sheet) history.back();
 }
@@ -846,6 +1140,7 @@ async function editorAction(act, el) {
 function bindSheet() {
   const s = $('#sheet');
   s.addEventListener('click', async e => {
+    if (BE) return bulkClick(e);
     if (!ED) {
       const d = e.target.closest('[data-dt]');
       if (d) {
@@ -915,6 +1210,11 @@ function bindSheet() {
     }
   });
   s.addEventListener('input', e => {
+    if (BE && e.target.id === 'beColor') {
+      readBulkFields(); BE.color = e.target.value; BE.level = 'custom';
+      $$('[data-be-level]', s).forEach(x => x.classList.remove('on'));
+      return;
+    }
     if (!ED) return;
     if (e.target.id === 'edColor') {
       ED.color = e.target.value; ED.customColor = true;
@@ -925,6 +1225,12 @@ function bindSheet() {
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
   s.addEventListener('change', async e => {
+    if (BE && e.target.id === 'bePhotoInput') {
+      readBulkFields();
+      for (const f of e.target.files) { try { BE.addPhotos.push(await compressImage(f)); } catch (err) { toast('Photo illisible'); } }
+      const y = $('#sheet').scrollTop; renderBulk(); $('#sheet').scrollTop = y;
+      return;
+    }
     if (!ED || e.target.id !== 'edPhotoInput') return;
     readEditorFields();
     for (const f of e.target.files) {
@@ -1468,11 +1774,8 @@ async function renderSettings(v) {
       <p class="note">Sans réponse, l’alarme sonne pendant la durée choisie, s’arrête, puis resonne après l’intervalle, autant de fois que prévu. Chaque alarme peut avoir ses propres réglages.</p>
     </div>
 
-    <h2>Supprimer des alarmes par mot</h2>
-    <div class="card">
-      <input type="text" id="bulkWord" placeholder="Mot à chercher (titre ou description)" value="${esc(S.bulkWord || '')}" autocomplete="off">
-      <div id="bulkRes" class="note" style="margin-top:8px">${bulkResultHTML()}</div>
-    </div>
+    <h2>Modifier ou supprimer en groupe</h2>
+    <div class="card note">Onglet Alarmes : cherche un mot, touche « Sélectionner », puis « Tout sélectionner ». Tu peux ensuite modifier, activer, désactiver ou supprimer toutes ces alarmes d’un coup.</div>
 
     <h2>Préférences</h2>
     <div class="card">
@@ -1539,7 +1842,30 @@ function bindMain() {
   $$('.tabs button').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   $('#fab').addEventListener('click', () => openEditor(null, S.tab === 'calendar' ? S.calSel : null));
   const v = $('#view');
+  v.addEventListener('input', e => {
+    if (e.target.id !== 'listSearch') return;
+    S.search = e.target.value;
+    renderListBody();
+  });
   v.addEventListener('click', async e => {
+    const sb = e.target.closest('[data-sel]');
+    if (sb && S.tab === 'list') {
+      const act = sb.dataset.sel;
+      if (act === 'toggle') { S.selMode = !S.selMode; if (!S.selMode) S.sel.clear(); }
+      if (act === 'all') S.visibleIds.forEach(id => S.sel.add(id));
+      if (act === 'none') S.sel.clear();
+      keepScroll(renderListBody);
+      return;
+    }
+    const pk = e.target.closest('[data-pick]');
+    if (pk && S.selMode) {
+      const id = pk.dataset.pick;
+      S.sel.has(id) ? S.sel.delete(id) : S.sel.add(id);
+      pk.classList.toggle('picked', S.sel.has(id));
+      $('.selbox', pk).textContent = S.sel.has(id) ? '✓' : '';
+      updateSelBar();
+      return;
+    }
     const tg = e.target.closest('[data-toggle]');
     if (tg) {
       e.stopPropagation();
@@ -1548,13 +1874,13 @@ function bindMain() {
         a.enabled = tg.checked; await saveAlarms();
         const n = a.enabled ? nextOcc(a) : null;
         toast(a.enabled ? (n ? `Activée · ${relDay(n)} ${fmtTime(n)}` : 'Activée (aucune date à venir)') : 'Désactivée');
-        if (S.tab !== 'calendar') keepScroll(render);
+        if (S.tab !== 'calendar') keepScroll(renderListBody);
       }
       return;
     }
     if (e.target.closest('[data-stop]')) return;
     const f = e.target.closest('[data-filter]');
-    if (f) { S.listFilter = f.dataset.filter; render(); return; }
+    if (f) { S.listFilter = f.dataset.filter; renderListBody(); return; }
     if (S.tab === 'calendar') {
       const c = e.target.closest('[data-cal]');
       if (c) { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() + Number(c.dataset.cal), 1); render(); return; }

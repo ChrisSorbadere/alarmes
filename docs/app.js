@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.5.1';
+const VERSION = '1.6.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -103,7 +103,7 @@ const DB = {
 
 const S = {
   alarms: [],
-  settings: { snoozeMin: 10, defaultTime: '07:30', veilleTime: '20:00', ringMin: 2, repeats: 2, sound: null },
+  settings: { snoozeMin: 10, defaultTime: '07:30', veilleTime: '20:00', ringMin: 2, repeats: 2, sound: null, fadeSec: 0, maxVol: false },
   tab: 'list',
   search: '',
   selMode: false,
@@ -245,12 +245,32 @@ function effRing(a) {
     sound: r.sound || S.settings.sound || null,
     durationMin: r.durationMin || Number(S.settings.ringMin) || 2,
     repeats: (r.repeats === 0 || r.repeats) ? r.repeats : Number(S.settings.repeats ?? 2),
+    fadeSec: (r.fadeSec === 0 || r.fadeSec) ? r.fadeSec : Number(S.settings.fadeSec || 0),
+    maxVol: (r.maxVol === true || r.maxVol === false) ? r.maxVol : !!S.settings.maxVol,
   };
+}
+const FADE_CHOICES = [[0, 'Non'], [15, 'En 15 s'], [30, 'En 30 s'], [60, 'En 1 min'], [120, 'En 2 min']];
+const fadeLabel = n => (FADE_CHOICES.find(x => x[0] === Number(n)) || FADE_CHOICES[0])[1];
+/** Bloc « volume progressif » réutilisé dans l'éditeur, les réglages et la modification groupée. */
+function fadeControlsHTML(idFade, idMax, curFade, curMax, mode) {
+  const d = effRing({});
+  const first = mode === 'edit' ? `<option value="">Par défaut (${fadeLabel(d.fadeSec).toLowerCase()})</option>`
+    : mode === 'bulk' ? '<option value="">Ne pas changer</option><option value="def">Par défaut</option>' : '';
+  const firstMax = mode === 'edit' ? `<option value="">Par défaut (${d.maxVol ? 'oui' : 'non'})</option>`
+    : mode === 'bulk' ? '<option value="">Ne pas changer</option><option value="def">Par défaut</option>' : '';
+  const selF = v => String(curFade) === String(v) ? 'selected' : '';
+  const selM = v => String(curMax) === String(v) ? 'selected' : '';
+  return `<div class="row">
+      <div><label class="f">Volume progressif</label>
+        <select id="${idFade}">${first}${FADE_CHOICES.map(([v, l]) => `<option value="${v}" ${selF(v)}>${l}</option>`).join('')}</select></div>
+      <div><label class="f">Finir au volume max</label>
+        <select id="${idMax}">${firstMax}<option value="0" ${selM('0')}>Non</option><option value="1" ${selM('1')}>Oui</option></select></div>
+    </div>`;
 }
 const soundName = snd => snd ? snd.name : 'Son d’alarme du téléphone';
 function ringSummary(a) {
   const e = effRing(a);
-  return `${soundName(e.sound)} · ${e.durationMin} min · répétitions : ${repLabel(e.repeats)}`;
+  return `${soundName(e.sound)} · ${e.durationMin} min · répétitions : ${repLabel(e.repeats)}${e.fadeSec ? ' · progressif ' + e.fadeSec + ' s' : ''}${e.maxVol ? ' · volume max' : ''}`;
 }
 async function pickSound(kind, current) {
   if (!Native) { toast('Disponible dans l’appli Android'); return null; }
@@ -330,6 +350,8 @@ function nativePayload() {
         soundUri: effRing(a).sound ? effRing(a).sound.uri : '',
         durationMin: effRing(a).durationMin,
         repeats: effRing(a).repeats,
+        fadeSec: effRing(a).fadeSec,
+        maxVol: effRing(a).maxVol,
         ringIndex: 0,
       });
     }
@@ -370,13 +392,16 @@ async function syncNative() {
 
 /* ---------- Sonnerie dans le navigateur (repli hors APK) ---------- */
 let audioCtx = null, beepTimer = null;
-function startBeep() {
+let beepFade = 0, beepStart = 0;
+function startBeep(fadeSec = 0) {
+  beepFade = fadeSec; beepStart = Date.now();
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     const beep = () => {
       const o = audioCtx.createOscillator(), g = audioCtx.createGain();
       o.frequency.value = 880; o.connect(g); g.connect(audioCtx.destination);
-      g.gain.setValueAtTime(0.25, audioCtx.currentTime);
+      const k = beepFade ? Math.min(1, Math.max(0.05, ((Date.now() - beepStart) / 1000 / beepFade) ** 2)) : 1;
+      g.gain.setValueAtTime(0.25 * k, audioCtx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
       o.start(); o.stop(audioCtx.currentTime + 0.5);
       if (navigator.vibrate) navigator.vibrate(400);
@@ -408,7 +433,7 @@ function showRing(a, when, ringIndex = 0) {
     </div>
     <div class="btns"><button class="btn primary" data-r="stop">Arrêter</button></div>`;
   r.hidden = false;
-  stopBeep(); startBeep();
+  stopBeep(); startBeep(eff.fadeSec);
   ringTimer = setTimeout(() => {
     stopBeep(); r.hidden = true;
     if (ringIndex < eff.repeats) {
@@ -646,7 +671,7 @@ function openBulkEditor() {
     ids: [...S.sel],
     timeMode: 'keep', timeValue: S.settings.defaultTime || '07:30', timeShift: '',
     dayShift: '', mode: '', level: '', color: '',
-    soundMode: 'keep', sound: null, dur: '', rep: '',
+    soundMode: 'keep', sound: null, dur: '', rep: '', fade: '', max: '',
     placeMode: 'keep', placeLabel: '', placeUrl: '',
     contactMode: 'keep', ctName: '', ctPhone: '', ctEmail: '',
     addPhotos: [], clearPhotos: false, appendDesc: '', find: '', replace: '',
@@ -665,6 +690,8 @@ function readBulkFields() {
   BE.mode = val('beMode') ?? BE.mode;
   BE.dur = val('beDur') ?? BE.dur;
   BE.rep = val('beRep') ?? BE.rep;
+  BE.fade = val('beFade') ?? BE.fade;
+  BE.max = val('beMax') ?? BE.max;
   if (g('bePlLabel')) { BE.placeLabel = val('bePlLabel').trim(); BE.placeUrl = val('bePlUrl').trim(); }
   if (g('beCtName')) { BE.ctName = val('beCtName').trim(); BE.ctPhone = val('beCtPhone').trim(); BE.ctEmail = val('beCtEmail').trim(); }
   if (g('beClearPh')) BE.clearPhotos = g('beClearPh').checked;
@@ -719,6 +746,7 @@ function renderBulk() {
         <div><label class="f">Répétitions</label>
           <select id="beRep"><option value="">Ne pas changer</option><option value="def" ${b.rep === 'def' ? 'selected' : ''}>Par défaut</option>${REP_CHOICES.map(x => `<option value="${x}" ${b.rep === String(x) ? 'selected' : ''}>${x === 0 ? 'Aucune' : x + ' fois'}</option>`).join('')}</select></div>
       </div>
+      ${fadeControlsHTML('beFade', 'beMax', b.fade, b.max, 'bulk')}
     </div>
 
     <label class="f">Lieu</label>
@@ -771,7 +799,7 @@ async function applyBulk() {
   const shiftMin = b.timeMode === 'shift' ? Math.round(Number(b.timeShift) || 0) : 0;
   const days = Math.round(Number(b.dayShift) || 0);
   const findRe = b.find.trim() ? new RegExp(b.find.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : null;
-  const hasChange = (b.timeMode === 'set') || shiftMin || days || b.mode || b.level || b.soundMode !== 'keep' || b.dur || b.rep
+  const hasChange = (b.timeMode === 'set') || shiftMin || days || b.mode || b.level || b.soundMode !== 'keep' || b.dur || b.rep || b.fade || b.max
     || b.placeMode !== 'keep' || b.contactMode !== 'keep' || b.addPhotos.length || b.clearPhotos || b.appendDesc.trim() || findRe;
   if (!hasChange) { toast('Aucun changement choisi'); return; }
   if (b.soundMode === 'set' && !b.sound) { toast('Choisis un son, ou mets « Ne pas changer »'); return; }
@@ -794,7 +822,9 @@ async function applyBulk() {
     if (b.mode) a.mode = b.mode;
     if (b.level === 'custom') { a.color = b.color; a.customColor = true; }
     else if (b.level) { a.level = b.level; a.customColor = false; a.color = ''; }
-    if (b.soundMode !== 'keep' || b.dur || b.rep) a.ring = a.ring || {};
+    if (b.soundMode !== 'keep' || b.dur || b.rep || b.fade || b.max) a.ring = a.ring || {};
+    if (b.fade) a.ring.fadeSec = b.fade === 'def' ? null : Number(b.fade);
+    if (b.max) a.ring.maxVol = b.max === 'def' ? null : b.max === '1';
     if (b.soundMode === 'default') a.ring.sound = null;
     if (b.soundMode === 'set') a.ring.sound = b.sound;
     if (b.dur) a.ring.durationMin = b.dur === 'def' ? null : Number(b.dur);
@@ -1066,6 +1096,7 @@ function editorRingHTML(a) {
         <div><label class="f">Répétitions</label>
           <select id="edRep"><option value="">Par défaut (${repLabel(d.repeats)})</option>${REP_CHOICES.map(n => `<option value="${n}" ${r.repeats === n ? 'selected' : ''}>${n === 0 ? 'Aucune' : n + ' fois'}</option>`).join('')}</select></div>
       </div>
+      ${fadeControlsHTML('edFade', 'edMax', (r.fadeSec === 0 || r.fadeSec) ? r.fadeSec : '', (r.maxVol === true || r.maxVol === false) ? (r.maxVol ? '1' : '0') : '', 'edit')}
       <p class="note">Sans réponse, l’alarme s’arrête après la durée choisie, puis resonne ${S.settings.snoozeMin} min plus tard, autant de fois que prévu.</p>
     </div>`;
 }
@@ -1194,6 +1225,8 @@ function readEditorFields() {
     ED.ring = ED.ring || {};
     ED.ring.durationMin = g('edDur').value ? Number(g('edDur').value) : null;
     ED.ring.repeats = g('edRep').value === '' ? null : Number(g('edRep').value);
+    ED.ring.fadeSec = g('edFade').value === '' ? null : Number(g('edFade').value);
+    ED.ring.maxVol = g('edMax').value === '' ? null : g('edMax').value === '1';
   }
   if (g('edStart')) ED.schedule.start = g('edStart').value || ymd(today0());
   if (g('edEnd')) ED.schedule.end = g('edEnd').value || '';
@@ -1273,7 +1306,7 @@ async function editorAction(act, el) {
         const tid = 'test_' + ED.id;
         S.lastTestId = tid;
         if ((ED.photos || []).length) await Native.setPhotos({ id: tid, photos: ED.photos });
-        await Native.test(Object.assign({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 }, extrasPayload(ED), { alarmId: tid }));
+        await Native.test(Object.assign({ seconds: 5, title: ED.title || 'Test', body: ED.description || 'Test d’alarme', color: colorOf(ED), levelLabel: levelOf(ED) ? levelOf(ED).label : '', mode: ED.mode, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0, fadeSec: er.fadeSec, maxVol: er.maxVol }, extrasPayload(ED), { alarmId: tid }));
         toast('Sonnerie dans 5 secondes… tu peux verrouiller le téléphone.');
       } catch (e) { toast('Test impossible : ' + (e.message || e)); }
       return;
@@ -2051,6 +2084,8 @@ async function renderSettings(v) {
         <div><label class="f">Répétitions</label>
           <select id="setRep">${REP_CHOICES.map(n => `<option value="${n}" ${Number(S.settings.repeats) === n ? 'selected' : ''}>${n === 0 ? 'Aucune' : n + ' fois'}</option>`).join('')}</select></div>
       </div>
+      ${fadeControlsHTML('setFade', 'setMax', Number(S.settings.fadeSec || 0), S.settings.maxVol ? '1' : '0', 'settings')}
+      <p class="note">« Volume progressif » : le son démarre très bas et monte jusqu’au volume d’alarme du téléphone. « Finir au volume max » pousse ce volume au maximum le temps de la sonnerie, puis le remet comme avant.</p>
       <label class="f">Intervalle (snooze et répétitions)</label>
       <select id="setSnooze">${[5, 10, 15, 20, 30, 60].map(n => `<option value="${n}" ${Number(S.settings.snoozeMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select>
       <p class="note">Sans réponse, l’alarme sonne pendant la durée choisie, s’arrête, puis resonne après l’intervalle, autant de fois que prévu. Chaque alarme peut avoir ses propres réglages.</p>
@@ -2112,7 +2147,7 @@ function bindSettings() {
     if (b.dataset.set === 'preview') { togglePreview(S.settings.sound); return; }
     if (b.dataset.set === 'test' && Native) {
       const er = effRing({});
-      await Native.test({ seconds: 5, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0 });
+      await Native.test({ seconds: 5, soundUri: er.sound ? er.sound.uri : '', durationMin: er.durationMin, repeats: 0, fadeSec: er.fadeSec, maxVol: er.maxVol });
       toast('Sonnerie dans 5 secondes… verrouille le téléphone pour voir l’écran plein.');
       return;
     }
@@ -2131,6 +2166,8 @@ function bindSettings() {
     if (e.target.id === 'setDefTime') { S.settings.defaultTime = e.target.value || '07:30'; await saveSettings(); }
     if (e.target.id === 'restoreFile' && e.target.files[0]) { await doRestore(e.target.files[0], S.restoreMode || 'merge'); return; }
     if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
+    if (e.target.id === 'setFade') { S.settings.fadeSec = Number(e.target.value); await saveSettings(); toast('Volume progressif : ' + fadeLabel(e.target.value).toLowerCase()); }
+    if (e.target.id === 'setMax') { S.settings.maxVol = e.target.value === '1'; await saveSettings(); toast('Finir au volume max : ' + (S.settings.maxVol ? 'oui' : 'non')); }
     if (e.target.id === 'setRep') { S.settings.repeats = Number(e.target.value); await saveSettings(); toast('Répétitions : ' + repLabel(Number(e.target.value))); }
   });
   v.addEventListener('input', e => {

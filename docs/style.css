@@ -245,3 +245,21 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .ring-photos img { height: 160px; max-width: 100%; border-radius: 14px; object-fit: cover; }
 .ring-photos img:only-child { width: 100%; height: 190px; }
 .ring a.btn { text-align: center; text-decoration: none; color: #fff; background: rgba(255,255,255,.22); }
+
+/* Recherche et sélection multiple */
+.searchbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.searchbar input { flex: 1; }
+.searchbar .btn { flex: none; }
+input[type=search] { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); }
+.selbox { flex: none; width: 28px; height: 28px; border-radius: 8px; border: 2px solid var(--muted); display: grid; place-items: center; font-weight: 800; }
+.alarm.picked { outline: 2px solid var(--accent); outline-offset: -2px; }
+.alarm.picked .selbox { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.selbar {
+  position: fixed; left: 0; right: 0; bottom: calc(var(--sab) + 62px); z-index: 22;
+  background: var(--card); border-top: 1px solid var(--line); padding: 10px 12px;
+  box-shadow: 0 -4px 14px rgba(0,0,0,.12);
+}
+.selcount { font-size: 14px; margin-bottom: 8px; }
+.selbtns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.selbtns .btn { padding: 9px 4px; font-size: 13px; }
+body.selmode { padding-bottom: calc(var(--sab) + 170px); }

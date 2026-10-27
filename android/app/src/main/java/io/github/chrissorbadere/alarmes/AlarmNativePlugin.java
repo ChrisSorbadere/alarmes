@@ -141,6 +141,7 @@ public class AlarmNativePlugin extends Plugin {
         }
         r.put("batteryFree", battery);
         r.put("scheduled", AlarmStore.load(c).length());
+        r.put("overlay", Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(c));
         call.resolve(r);
     }
 
@@ -202,6 +203,9 @@ public class AlarmNativePlugin extends Plugin {
                 } else {
                     i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
                 }
+                break;
+            case "overlay":
+                i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + pkg));
                 break;
             case "battery":
                 i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + pkg));

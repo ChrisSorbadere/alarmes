@@ -16,6 +16,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.VibrationEffect;
+import android.provider.Settings;
 import android.os.Vibrator;
 import android.util.Log;
 import org.json.JSONObject;
@@ -94,6 +95,7 @@ public class AlarmService extends Service {
             acquireWakeLock(minutes * 60000L + 30000L);
             startSound(a.optString("soundUri", ""));
             startVibration();
+            openAlarmScreen(nid, a);
             ringingNid = nid;
             if (timeout != null) handler.removeCallbacks(timeout);
             timeout = this::onTimeout;
@@ -120,6 +122,21 @@ public class AlarmService extends Service {
 
         if (curNid == 0) stopSelf();
         return START_NOT_STICKY;
+    }
+
+    /** Ouvre l'écran plein même si le téléphone est en cours d'utilisation
+     *  (possible grâce à l'autorisation « Afficher par-dessus les autres applis »). */
+    private void openAlarmScreen(int nid, JSONObject a) {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) return;
+        try {
+            Intent i = new Intent(this, AlarmActivity.class);
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+            i.putExtra("nid", nid);
+            i.putExtra("json", a.toString());
+            startActivity(i);
+        } catch (Exception e) {
+            Log.w(AlarmStore.TAG, "Ouverture de l'écran d'alarme refusée", e);
+        }
     }
 
     /** Personne n'a arrêté l'alarme pendant la durée prévue. */

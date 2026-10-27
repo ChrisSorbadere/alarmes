@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -335,13 +335,30 @@ function nativePayload() {
     }
   }
   list.sort((x, y) => x.at - y.at);
-  return list.slice(0, MAX_NATIVE);
+  const truncated = list.length > MAX_NATIVE - 1;
+  const kept = list.slice(0, MAX_NATIVE - 1);
+  const beyond = truncated || S.alarms.some(a => a.enabled && nextOcc(a, to));
+  if (beyond && kept.length) {
+    const nowMs = now.getTime();
+    let at = truncated ? kept[kept.length - 1].at - 2 * 86400000 : nowMs + (HORIZON_DAYS - 7) * 86400000;
+    if (at < nowMs + 3600000) at = nowMs + 3600000;
+    const until = new Date(kept[kept.length - 1].at);
+    kept.push({
+      nid: 1888888888, at, title: 'Alarmes : ouvre l’appli',
+      body: `Tes sonneries sont programmées jusqu’au ${fmtShort(until)}. Ouvre l’appli Alarmes pour programmer la suite.`,
+      color: '#64748b', levelLabel: '', mode: 'notif', alarmId: '', hasExtras: false,
+      photoCount: 0, contactName: '', contactPhone: '', placeLabel: '', placeNavUrl: '',
+      soundUri: '', durationMin: 1, repeats: 0, ringIndex: 0,
+    });
+  }
+  return kept;
 }
 
 let lastSync = { count: 0, until: null };
 async function syncNative() {
   const list = nativePayload();
-  lastSync = { count: list.length, until: list.length ? new Date(list[list.length - 1].at) : null };
+  const real = list.filter(x => x.nid !== 1888888888);
+  lastSync = { count: real.length, until: real.length ? new Date(real[real.length - 1].at) : null };
   if (!Native) return;
   await syncPhotos();
   try {
@@ -458,6 +475,7 @@ function alarmCard(a, when) {
     a.contact ? '👤' : '',
     a.place ? '📍' : '',
     a.source ? '📥' : '',
+    a.event ? (a.event.missing ? '⚠️📅' : '📅') : '',
     a.mode === 'notif' ? '🔕' : '',
   ].join('');
   const sub = when ? `${capital(relDay(when))} · ${scheduleSummary(a)}` : scheduleSummary(a);
@@ -526,6 +544,7 @@ function renderListBody() {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  if (backupDue() && !S.selMode) html += `<div class="card banner" data-gobackup="1">💾 <b>Pense à sauvegarder tes alarmes</b><div class="note">${backupStatus()} Touche ici pour le faire.</div></div>`;
   if (S.search.trim()) html += `<p class="note" style="margin:0 4px 8px">${items.length} résultat${items.length > 1 ? 's' : ''} pour « ${esc(S.search.trim())} »</p>`;
   if (S.selMode) {
     const allIn = items.length && items.every(x => S.sel.has(x.a.id));
@@ -957,7 +976,7 @@ function renderEditor() {
     <textarea id="edDesc" placeholder="Tout ce que tu veux te rappeler…">${esc(a.description)}</textarea>
 
     <div class="row">
-      <div><label class="f">Heure</label><input type="time" id="edTime" value="${esc(a.time)}"></div>
+      <div><label class="f">Heure</label><input type="time" id="edTime" value="${esc(a.time)}" ${a.event ? 'disabled' : ''}></div>
       <div><label class="f">Type</label>
         <select id="edMode">
           <option value="alarm" ${a.mode !== 'notif' ? 'selected' : ''}>Sonnerie d'alarme</option>
@@ -971,6 +990,9 @@ function renderEditor() {
     <div class="levels">${LEVELS.map(l => `<button data-level="${l.id}" class="${lvl === l.id ? 'on' : ''}" style="--c:${l.color}">${l.label}</button>`).join('')}</div>
     <label class="custom-color"><input type="color" id="edColor" value="${colorOf(a)}"> Autre couleur${a.customColor ? ' (choisie)' : ''}</label>
 
+    ${editorEventHTML(a)}
+
+    <div ${a.event ? 'hidden' : ''}>
     <label class="f">Quand</label>
     <div class="seg" id="edType">
       <button data-type="dates" class="${sc.type === 'dates' ? 'on' : ''}">Dates choisies</button>
@@ -985,6 +1007,7 @@ function renderEditor() {
     <div style="margin-top:12px" id="edCal">${editorCalendar()}</div>
     <div class="cal-legend">${legend}</div>
     <div class="note" id="edNext" style="margin-top:6px"></div>
+    </div>
 
     <label class="f">Photos</label>
     <div class="photos">
@@ -1047,12 +1070,125 @@ function editorRingHTML(a) {
     </div>`;
 }
 
+/* ---------- Lien avec un événement de l'agenda ---------- */
+const EVENT_OFFSETS = [[0, 'À l’heure de l’événement'], [5, '5 min avant'], [10, '10 min avant'], [15, '15 min avant'], [30, '30 min avant'], [60, '1 h avant'], [120, '2 h avant'], [1440, 'La veille (24 h avant)']];
+
+function eventStart(ev) {
+  if (!ev.allDay) return new Date(ev.begin);
+  const u = new Date(ev.begin);
+  return new Date(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate(), 9, 0, 0, 0);
+}
+function eventLabel(ev) {
+  const d = eventStart(ev);
+  return `${capital(fmtDate(d))}${ev.allDay ? ' (toute la journée)' : ' à ' + fmtTime(d)}`;
+}
+function applyEventSchedule(a) {
+  if (!a.event) return;
+  const d = new Date(eventStart(a.event).getTime() - (Number(a.eventOffset) || 0) * 60000);
+  a.schedule = newSchedule('dates');
+  a.schedule.dates = [ymd(d)];
+  a.time = fmtTime(d);
+}
+
+function editorEventHTML(a) {
+  if (!a.event) {
+    return isNative ? `<div class="btns"><button class="btn" data-ed="linkEvent">📅 Lier à un événement de l’agenda</button></div>` : '';
+  }
+  const ev = a.event;
+  const ring = new Date(eventStart(ev).getTime() - (Number(a.eventOffset) || 0) * 60000);
+  return `<div class="card" style="margin-top:14px;border-left:6px solid ${esc(ev.color || '#64748b')}">
+      <b>📅 ${esc(ev.title || 'Événement')}</b>
+      <div class="note">${esc(eventLabel(ev))}${ev.calendar ? ' · ' + esc(ev.calendar) : ''}</div>
+      ${ev.missing ? '<div class="note" style="color:var(--danger)">⚠️ Événement introuvable dans l’agenda (supprimé ?).</div>' : ''}
+      <label class="f">Quand sonner</label>
+      <select id="edEvOffset">${EVENT_OFFSETS.map(([m, l]) => `<option value="${m}" ${Number(a.eventOffset) === m ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <p class="note">Sonnera ${esc(relDay(ring))} à ${fmtTime(ring)}. Si tu déplaces l’événement dans ton agenda, l’alarme suit (à l’ouverture de l’appli).</p>
+      <div class="btns" style="margin-top:0">
+        <button class="btn small" data-ed="linkEvent">Changer</button>
+        <button class="btn small" data-ed="openEvent">Ouvrir dans l’agenda</button>
+        <button class="btn small" data-ed="unlinkEvent">Délier</button>
+      </div>
+    </div>`;
+}
+
+async function openEventPicker(onPick) {
+  let pk = $('#picker');
+  if (!pk) { pk = document.createElement('div'); pk.id = 'picker'; pk.className = 'sheet picker'; document.body.appendChild(pk); }
+  pk.innerHTML = `<div class="sheet-head"><button data-pk="close">✕</button><h3>Choisir un événement</h3></div>
+    <div class="sheet-body"><input type="search" id="pkSearch" placeholder="🔍 Rechercher…" autocomplete="off"><div id="pkList" class="note" style="margin-top:12px">Lecture de l’agenda…</div></div>`;
+  pk.hidden = false;
+  let events = [];
+  const draw = () => {
+    const w = norm($('#pkSearch').value).trim();
+    const list = events.filter(e => !w || norm(e.title + ' ' + e.location + ' ' + e.calendar).includes(w));
+    if (!list.length) { $('#pkList').innerHTML = events.length ? 'Aucun événement ne correspond.' : 'Aucun événement dans les 4 prochains mois.'; return; }
+    let html = '', day = '';
+    list.slice(0, 300).forEach((e, i) => {
+      const d = eventStart(e), k = ymd(d);
+      if (k !== day) { day = k; html += `<h2>${capital(relDay(d))}</h2>`; }
+      html += `<div class="card evrow" data-pk-i="${events.indexOf(e)}" style="border-left:6px solid ${esc(e.color)}">
+        <b>${esc(e.title || '(sans titre)')}</b>
+        <div class="note">${e.allDay ? 'Toute la journée' : fmtTime(d) + ' – ' + fmtTime(new Date(e.end))}${e.location ? ' · ' + esc(e.location) : ''}</div>
+        <div class="note">${esc(e.calendar)}</div></div>`;
+    });
+    $('#pkList').innerHTML = html;
+    $('#pkList').classList.remove('note');
+  };
+  pk.oninput = e => { if (e.target.id === 'pkSearch') draw(); };
+  pk.onclick = e => {
+    if (e.target.closest('[data-pk="close"]')) { pk.hidden = true; return; }
+    const row = e.target.closest('[data-pk-i]');
+    if (row) { pk.hidden = true; onPick(events[Number(row.dataset.pkI)]); }
+  };
+  try {
+    const r = await Native.listEvents({ days: 120 });
+    events = (r.events || []).filter(e => !e.allDay || eventStart(e) >= today0());
+    draw();
+  } catch (err) {
+    $('#pkList').textContent = 'Agenda inaccessible : ' + (err.message || err) + '. Autorise l’accès à l’agenda dans les réglages Android de l’appli.';
+  }
+}
+
+/** Suit les événements liés : si l'un a été déplacé dans l'agenda, l'alarme suit. */
+async function syncEvents() {
+  if (!Native) return false;
+  const linked = S.alarms.filter(a => a.event && a.event.id);
+  if (!linked.length) return false;
+  let r;
+  try { r = await Native.findEvents({ ids: [...new Set(linked.map(a => a.event.id))] }); } catch (e) { return false; }
+  if (!r || !r.allowed) return false;
+  const byId = {};
+  (r.events || []).forEach(e => { (byId[e.id] = byId[e.id] || []).push(e); });
+  const now = Date.now();
+  let moved = 0, changed = false;
+  for (const a of linked) {
+    if (a.event.begin < now - 2 * 86400000) continue;
+    const insts = byId[a.event.id] || [];
+    if (!insts.length) {
+      if (!a.event.missing) { a.event.missing = true; changed = true; }
+      continue;
+    }
+    const best = insts.reduce((x, y) => Math.abs(y.begin - a.event.begin) < Math.abs(x.begin - a.event.begin) ? y : x);
+    const wasMissing = a.event.missing;
+    if (best.begin !== a.event.begin || best.end !== a.event.end || best.allDay !== a.event.allDay || best.title !== a.event.title || wasMissing) {
+      if (best.begin !== a.event.begin || best.allDay !== a.event.allDay) moved++;
+      Object.assign(a.event, { begin: best.begin, end: best.end, allDay: best.allDay, title: best.title, location: best.location, calendar: best.calendar, color: best.color, missing: false });
+      applyEventSchedule(a);
+      changed = true;
+    }
+  }
+  if (changed) await DB.set('alarms', S.alarms);
+  if (moved) toast(`${moved} alarme(s) déplacée(s) avec leur événement`, 3500);
+  return changed;
+}
+
 function readEditorFields() {
   if (!ED) return;
   const g = id => document.getElementById(id);
   ED.title = g('edTitle').value.trim();
   ED.description = g('edDesc').value;
   ED.time = g('edTime').value || '07:30';
+  if (g('edEvOffset')) { ED.eventOffset = Number(g('edEvOffset').value) || 0; applyEventSchedule(ED); }
   ED.mode = g('edMode').value;
   if (g('edDur')) {
     ED.ring = ED.ring || {};
@@ -1147,6 +1283,24 @@ async function editorAction(act, el) {
       return;
     }
     case 'defSound': ED.ring = Object.assign(ED.ring || {}, { sound: null }); renderEditor(); return;
+    case 'linkEvent':
+      openEventPicker(ev => {
+        if (!ED) return;
+        const first = !ED.event;
+        ED.event = { id: ev.id, begin: ev.begin, end: ev.end, allDay: ev.allDay, title: ev.title, location: ev.location, calendar: ev.calendar, color: ev.color };
+        if (ED.eventOffset === undefined || ED.eventOffset === null) ED.eventOffset = ev.allDay ? 0 : 30;
+        if (first || !ED.title) ED.title = ED.title || ev.title;
+        if (!ED.description && ev.description) ED.description = ev.description;
+        if (!ED.place && ev.location) ED.place = { label: ev.location, url: '' };
+        applyEventSchedule(ED);
+        const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y;
+        toast('Lié à « ' + (ev.title || 'événement') + ' »');
+      });
+      return;
+    case 'unlinkEvent': ED.event = null; renderEditor(); return;
+    case 'openEvent':
+      try { await Native.openEvent({ id: ED.event.id, begin: ED.event.begin, end: ED.event.end }); } catch (e) { toast('Impossible d’ouvrir l’agenda'); }
+      return;
     case 'preview': togglePreview(effRing(ED).sound); return;
     case 'photo': $('#edPhotoInput').click(); return;
     case 'pickcontact':
@@ -1192,6 +1346,10 @@ function bindSheet() {
         const act = d.dataset.dt;
         if (act === 'close') closeSheet();
         if (act === 'edit') openEditor(d.dataset.id);
+        if (act === 'openevent') {
+          const a = S.alarms.find(x => x.id === d.dataset.id);
+          if (a && a.event) Native.openEvent({ id: a.event.id, begin: a.event.begin, end: a.event.end }).catch(() => toast('Impossible d’ouvrir l’agenda'));
+        }
       }
       return;
     }
@@ -1267,6 +1425,7 @@ function bindSheet() {
       refreshEditorCalendar();
     }
     if (e.target.id === 'edTime' || e.target.id === 'edStart' || e.target.id === 'edEnd') { readEditorFields(); refreshEditorCalendar(); }
+    if (e.target.id === 'edEvOffset') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
   s.addEventListener('change', async e => {
@@ -1318,6 +1477,9 @@ function openDetail(id) {
       </div>` : ''}
     ${a.place ? `<label class="f">Lieu</label>
       <div class="attach"><span>📍</span><div class="t"><b>${esc(a.place.label || 'Lieu')}</b>${a.place.url ? `<small>${esc(a.place.url)}</small>` : ''}</div>${(a.place.url || !/^salle\b/i.test(a.place.label || '')) ? `<a href="${esc(mapsUrl(a.place))}">Ouvrir Maps</a>` : ''}</div>` : ''}
+    ${a.event ? `<label class="f">Événement de l’agenda</label>
+      <div class="attach"><span>📅</span><div class="t"><b>${esc(a.event.title || 'Événement')}</b><small>${esc(eventLabel(a.event))}${a.event.missing ? ' · introuvable' : ''}</small></div>
+      ${isNative ? `<button class="btn small" data-dt="openevent" data-id="${a.id}">Ouvrir</button>` : ''}</div>` : ''}
     <label class="f">Prochaines sonneries</label>
     ${nx.length ? `<div class="card occ">${nx.map(d => `<div>${capital(relDay(d))} ${fmtTime(d)}</div>`).join('')}</div>` : `<p class="note">${a.enabled ? 'Aucune sonnerie à venir.' : 'Alarme désactivée.'}</p>`}
   </div>`;
@@ -1773,6 +1935,66 @@ function bulkResultHTML() {
     <div class="btns"><button class="btn danger" data-set="bulkdel">Supprimer ${m.length > 1 ? 'les ' + m.length + ' alarmes' : 'cette alarme'}</button></div>`;
 }
 
+function backupStatus() {
+  const t = S.settings.lastBackup;
+  if (!t) return S.alarms.length ? '⚠️ Aucune sauvegarde pour l’instant.' : 'Aucune sauvegarde pour l’instant.';
+  const days = Math.floor((Date.now() - t) / 86400000);
+  return `Dernière sauvegarde : ${days === 0 ? 'aujourd’hui' : days === 1 ? 'hier' : 'il y a ' + days + ' jours'}${S.settings.lastBackupName ? ' (' + esc(S.settings.lastBackupName) + ')' : ''}.`;
+}
+function backupDue() {
+  return S.alarms.length >= 5 && (!S.settings.lastBackup || Date.now() - S.settings.lastBackup > 30 * 86400000);
+}
+
+async function doBackup() {
+  const settings = Object.assign({}, S.settings);
+  delete settings.lastBackup; delete settings.lastBackupName;
+  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings };
+  const content = JSON.stringify(data);
+  const name = `alarmes-sauvegarde-${ymd(new Date())}.json`;
+  let savedName = name;
+  if (Native) {
+    try {
+      const r = await Native.saveFile({ name, content, mime: 'application/json' });
+      if (!r || r.cancelled) return;
+      savedName = r.name || name;
+    } catch (e) { toast('Sauvegarde impossible : ' + (e.message || e)); return; }
+  } else {
+    const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  S.settings.lastBackup = Date.now();
+  S.settings.lastBackupName = savedName;
+  await DB.set('settings', S.settings);
+  if (S.tab === 'settings') keepScroll(render);
+  toast(`Sauvegarde enregistrée : ${S.alarms.length} alarme(s)`);
+}
+
+async function doRestore(file, mode) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { toast('Fichier illisible'); return; }
+  if (!data || data.app !== 'alarmes' || !Array.isArray(data.alarms)) { toast('Ce fichier n’est pas une sauvegarde d’Alarmes'); return; }
+  const incoming = data.alarms.filter(a => a && a.id && a.schedule);
+  if (mode === 'replace') {
+    if (!confirm(`Remplacer tes ${S.alarms.length} alarme(s) par les ${incoming.length} de la sauvegarde du ${(data.exportedAt || '').slice(0, 10)} ?`)) return;
+    S.alarms = incoming;
+    if (data.settings) Object.assign(S.settings, data.settings);
+    await DB.set('settings', S.settings);
+    await saveAlarms();
+    toast(`${incoming.length} alarme(s) restaurée(s)`);
+  } else {
+    const ids = new Set(S.alarms.map(a => a.id));
+    let added = 0, skipped = 0;
+    for (const a of incoming) {
+      if (ids.has(a.id)) { skipped++; continue; }
+      S.alarms.push(a); added++;
+    }
+    await saveAlarms();
+    toast(`${added} alarme(s) ajoutée(s)${skipped ? `, ${skipped} déjà présente(s)` : ''}`);
+  }
+  keepScroll(render);
+}
+
 async function renderSettings(v) {
   let st = null;
   if (Native) { try { st = await Native.status(); } catch (e) { st = null; } }
@@ -1828,8 +2050,20 @@ async function renderSettings(v) {
       <input type="time" id="setDefTime" value="${S.settings.defaultTime}">
     </div>
 
+    <h2>Sauvegarde</h2>
+    <div class="card">
+      <p class="note" style="margin-top:0">${backupStatus()}</p>
+      <div class="btns" style="margin-top:0"><button class="btn primary" data-set="backup">💾 Sauvegarder maintenant</button></div>
+      <div class="btns">
+        <button class="btn small" data-set="restore">Restaurer (remplace tout)</button>
+        <button class="btn small" data-set="merge">Ajouter depuis une sauvegarde</button>
+      </div>
+      <input type="file" id="restoreFile" accept=".json,application/json,text/plain" hidden>
+      <p class="note">Enregistre le fichier dans Drive pour le retrouver après un changement de téléphone ou une réinstallation. Photos et réglages compris.</p>
+    </div>
+
     <h2>À venir</h2>
-    <div class="card note">Sauvegarde et restauration des alarmes · lien avec Google Agenda (accrocher une alarme à un événement) · lecture directe d’un fichier sur Drive.</div>
+    <div class="card note">Lecture directe d’un fichier sur Drive, sans passer par le sélecteur de fichiers.</div>
     <p class="note" style="text-align:center;margin-top:20px">Alarmes v${VERSION} · ${S.alarms.length} alarme(s)</p>`;
 }
 
@@ -1867,11 +2101,18 @@ function bindSettings() {
       return;
     }
     if (b.dataset.set === 'webnotif') { await Notification.requestPermission(); render(); }
+    if (b.dataset.set === 'backup') { await doBackup(); return; }
+    if (b.dataset.set === 'restore' || b.dataset.set === 'merge') {
+      S.restoreMode = b.dataset.set === 'restore' ? 'replace' : 'merge';
+      const inp = $('#restoreFile'); inp.value = ''; inp.click();
+      return;
+    }
   });
   v.addEventListener('change', async e => {
     if (S.tab !== 'settings') return;
     if (e.target.id === 'setSnooze') { S.settings.snoozeMin = Number(e.target.value); await saveSettings(); toast('Snooze : ' + e.target.value + ' min'); }
     if (e.target.id === 'setDefTime') { S.settings.defaultTime = e.target.value || '07:30'; await saveSettings(); }
+    if (e.target.id === 'restoreFile' && e.target.files[0]) { await doRestore(e.target.files[0], S.restoreMode || 'merge'); return; }
     if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
     if (e.target.id === 'setRep') { S.settings.repeats = Number(e.target.value); await saveSettings(); toast('Répétitions : ' + repLabel(Number(e.target.value))); }
   });
@@ -1953,6 +2194,7 @@ function bindMain() {
   });
   v.addEventListener('click', async e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
+    if (e.target.closest('[data-gobackup]')) { go('settings'); setTimeout(() => { const el = $('[data-set="backup"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     const sb = e.target.closest('[data-sel]');
     if (sb && (S.tab === 'list' || S.tab === 'calendar')) {
       const act = sb.dataset.sel;
@@ -2009,6 +2251,7 @@ async function start() {
     const b = $('#modeBadge'); b.hidden = false; b.textContent = 'navigateur';
   }
   go('list');
+  if (await syncEvents()) render();
   await syncNative();
   if (Native) {
     try {
@@ -2017,7 +2260,12 @@ async function start() {
     } catch (e) { /* ignore */ }
     try { const r = await Native.getLaunchAlarm(); if (r && r.alarmId) handleOpenAlarm(r.alarmId); } catch (e) { /* ignore */ }
     Native.addListener('openAlarm', r => handleOpenAlarm(r.alarmId));
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNative(); if (S.tab !== 'import' && $('#sheet').hidden) render(); } });
+    document.addEventListener('visibilitychange', async () => {
+      if (document.hidden) return;
+      await syncEvents();
+      await syncNative();
+      if (S.tab !== 'import' && $('#sheet').hidden) refreshView();
+    });
   } else {
     setInterval(webTick, 15000);
     webTick();

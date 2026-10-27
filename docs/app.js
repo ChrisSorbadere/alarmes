@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -1433,6 +1433,7 @@ async function renderSettings(v) {
       ${st ? row(st.notifications, 'Notifications', 'Indispensable pour que l’alarme s’affiche', `<button class="btn small" data-set="notif">Autoriser</button>`) +
         row(st.exact, 'Alarmes à l’heure exacte', 'Sinon Android peut retarder la sonnerie', `<button class="btn small" data-open="exact">Régler</button>`) +
         row(st.fullScreen, 'Écran plein sur téléphone verrouillé', 'Affiche la raison en grand quand ça sonne', `<button class="btn small" data-open="fullScreen">Régler</button>`) +
+        row(st.overlay, 'Afficher par-dessus les autres applis', 'Ouvre l’écran d’alarme même quand tu utilises le téléphone', `<button class="btn small" data-open="overlay">Régler</button>`) +
         row(st.batteryFree, 'Pas d’économie de batterie', 'Sur realme/ColorOS, évite que l’appli soit endormie', `<button class="btn small" data-open="battery">Régler</button>`)
         : '<p class="note">État indisponible.</p>'}
       <div class="btns"><button class="btn primary" data-set="test">🔔 Tester une alarme dans 5 s</button></div>

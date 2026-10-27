@@ -129,6 +129,7 @@ public class AlarmReceiver extends BroadcastReceiver {
             .setOngoing(true)
             .setAutoCancel(false)
             .setSilent(true)
+            .addAction(0, "Ouvrir", fullPi)
             .addAction(0, "Snooze " + AlarmStore.snoozeMinutes(c) + " min", serviceAction(c, nid, AlarmService.ACTION_SNOOZE, json))
             .addAction(0, "Arrêter", serviceAction(c, nid, AlarmService.ACTION_STOP, null))
             .setDeleteIntent(serviceAction(c, nid, AlarmService.ACTION_STOP, null));

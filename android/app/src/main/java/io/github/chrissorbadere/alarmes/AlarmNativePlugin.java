@@ -662,4 +662,91 @@ public class AlarmNativePlugin extends Plugin {
             call.reject("Partage impossible : " + e.getMessage());
         }
     }
+
+    // ---------- Mise à jour intégrée ----------
+
+    @PluginMethod
+    public void appInfo(PluginCall call) {
+        JSObject r = new JSObject();
+        try {
+            android.content.pm.PackageInfo pi = getContext().getPackageManager().getPackageInfo(getContext().getPackageName(), 0);
+            long code = Build.VERSION.SDK_INT >= 28 ? pi.getLongVersionCode() : pi.versionCode;
+            r.put("versionCode", code);
+            r.put("versionName", pi.versionName);
+        } catch (Exception e) {
+            r.put("versionCode", 0);
+        }
+        r.put("canInstall", Build.VERSION.SDK_INT < 26 || getContext().getPackageManager().canRequestPackageInstalls());
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void downloadAndInstall(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
+            try {
+                Intent i = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getContext().getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(i);
+            } catch (Exception ignored) {}
+            call.reject("Autorise d'abord l'installation d'applis pour Alarmes, puis réessaie.", "NEED_PERMISSION");
+            return;
+        }
+        final String url = call.getString("url", "");
+        final String name = call.getString("name", "Alarmes-maj.apk").replaceAll("[^A-Za-z0-9._-]", "_");
+        new Thread(() -> {
+            java.net.HttpURLConnection con = null;
+            try {
+                File dir = new File(getContext().getCacheDir(), "maj");
+                if (!dir.exists()) dir.mkdirs();
+                File[] old = dir.listFiles();
+                if (old != null) for (File f : old) f.delete();
+                File out = new File(dir, name);
+                String u = url;
+                int hops = 0;
+                while (true) {
+                    con = (java.net.HttpURLConnection) new java.net.URL(u).openConnection();
+                    con.setInstanceFollowRedirects(false);
+                    con.setConnectTimeout(20000);
+                    con.setReadTimeout(30000);
+                    int code = con.getResponseCode();
+                    if (code >= 300 && code < 400 && hops < 6) {
+                        u = new java.net.URL(new java.net.URL(u), con.getHeaderField("Location")).toString();
+                        con.disconnect();
+                        hops++;
+                        continue;
+                    }
+                    if (code != 200) throw new Exception("HTTP " + code);
+                    break;
+                }
+                long total = con.getContentLengthLong();
+                long done = 0;
+                int lastPct = -1;
+                try (java.io.InputStream in = con.getInputStream(); FileOutputStream fo = new FileOutputStream(out)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        fo.write(buf, 0, n);
+                        done += n;
+                        int pct = total > 0 ? (int) (done * 100 / total) : -1;
+                        if (pct != lastPct && pct % 5 == 0) {
+                            lastPct = pct;
+                            JSObject p = new JSObject();
+                            p.put("percent", pct);
+                            notifyListeners("updateProgress", p);
+                        }
+                    }
+                }
+                Uri apk = androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", out);
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(apk, "application/vnd.android.package-archive");
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(i);
+                call.resolve();
+            } catch (Exception e) {
+                call.reject("Téléchargement impossible : " + e.getMessage());
+            } finally {
+                if (con != null) con.disconnect();
+            }
+        }).start();
+    }
 }

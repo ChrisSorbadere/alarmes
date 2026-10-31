@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -120,6 +120,15 @@ async function loadAll() {
   S.alarms = await DB.get('alarms', []);
   S.settings = Object.assign(S.settings, await DB.get('settings', {}));
   S.fired = await DB.get('fired', {});
+  S.timers = await DB.get('timers', []);
+  S.library = await DB.get('photoLib', []);
+}
+async function saveTimers() {
+  await DB.set('timers', S.timers);
+  await syncNative();
+}
+async function saveLibrary() {
+  await DB.set('photoLib', S.library);
 }
 async function saveAlarms() {
   await DB.set('alarms', S.alarms);
@@ -356,11 +365,25 @@ function nativePayload() {
       });
     }
   }
+  const nowMs0 = now.getTime();
+  const tr = effRing({});
+  for (const t of S.timers || []) {
+    if (!t.endAt || t.endAt <= nowMs0) continue;
+    list.push({
+      nid: hashInt('timer|' + t.id + '|' + t.endAt), at: t.endAt,
+      title: '⏳ ' + (t.label || 'Compte à rebours terminé'),
+      body: `Compte à rebours de ${fmtDur(t.duration)} terminé.`,
+      color: '#7c3aed', levelLabel: 'Compte à rebours', mode: 'alarm', alarmId: '', hasExtras: false,
+      photoCount: 0, contactName: '', contactPhone: '', placeLabel: '', placeNavUrl: '',
+      soundUri: tr.sound ? tr.sound.uri : '', durationMin: tr.durationMin, repeats: 0,
+      fadeSec: 0, maxVol: tr.maxVol, ringIndex: 0, timer: true,
+    });
+  }
   list.sort((x, y) => x.at - y.at);
   const truncated = list.length > MAX_NATIVE - 1;
   const kept = list.slice(0, MAX_NATIVE - 1);
   const beyond = truncated || S.alarms.some(a => a.enabled && nextOcc(a, to));
-  if (beyond && kept.length) {
+  if (beyond && kept.some(x => !x.timer)) {
     const nowMs = now.getTime();
     let at = truncated ? kept[kept.length - 1].at - 2 * 86400000 : nowMs + (HORIZON_DAYS - 7) * 86400000;
     if (at < nowMs + 3600000) at = nowMs + 3600000;
@@ -459,6 +482,12 @@ function showRing(a, when, ringIndex = 0) {
 
 function webTick() {
   if (isNative) return;
+  for (const t of S.timers || []) {
+    if (t.endAt && t.endAt <= Date.now() && !t.rang) {
+      t.rang = true; DB.set('timers', S.timers);
+      showRing({ id: 'timer', title: '⏳ ' + (t.label || 'Compte à rebours terminé'), description: `Compte à rebours de ${fmtDur(t.duration)} terminé.`, color: '#7c3aed', customColor: true, ring: { repeats: 0, fadeSec: 0 }, photos: [] }, new Date());
+    }
+  }
   const now = new Date();
   const from = new Date(now.getTime() - 60000);
   for (const a of S.alarms) {
@@ -475,7 +504,7 @@ function webTick() {
 }
 
 /* ---------- Navigation ---------- */
-const TITLES = { list: 'Alarmes', calendar: 'Calendrier', import: 'Importer', settings: 'Réglages' };
+const TITLES = { list: 'Alarmes', calendar: 'Calendrier', timer: 'Compte à rebours', import: 'Importer', settings: 'Réglages' };
 function go(tab) {
   if (tab !== S.tab) { S.selMode = false; S.sel.clear(); }
   S.tab = tab;
@@ -489,6 +518,7 @@ function render() {
   const v = $('#view');
   if (S.tab === 'list') renderList(v);
   else if (S.tab === 'calendar') renderCalendarTab(v);
+  else if (S.tab === 'timer') renderTimers(v);
   else if (S.tab === 'import') renderImport(v);
   else renderSettings(v);
 }
@@ -604,6 +634,7 @@ function updateSelBar() {
   const on = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   document.body.classList.toggle('selmode', on);
   $('#fab').hidden = on || !(S.tab === 'list' || S.tab === 'calendar');
+  $('#fabQuick').hidden = $('#fab').hidden;
   bar.hidden = !on;
   if (!on) return;
   const n = S.sel.size, dis = n ? '' : 'disabled';
@@ -765,6 +796,7 @@ function renderBulk() {
     <div class="photos">
       ${b.addPhotos.map((p, i) => `<div class="ph"><img src="${p}" alt=""><button class="x" data-be-delph="${i}">✕</button></div>`).join('')}
       <button class="add" data-be="photo">+</button>
+      <button class="add lib" data-be="library">📚<small>Mes photos</small></button>
     </div>
     <input type="file" id="bePhotoInput" accept="image/*" multiple hidden>
     <label class="custom-color"><input type="checkbox" id="beClearPh" ${b.clearPhotos ? 'checked' : ''} style="width:20px;height:20px"> Retirer d’abord les photos existantes</label>
@@ -864,6 +896,7 @@ async function bulkClick(e) {
   switch (d.be) {
     case 'apply': return applyBulk();
     case 'photo': $('#bePhotoInput').click(); return;
+    case 'library': openPhotoPicker(list => { if (!BE) return; BE.addPhotos.push(...list); rerender(); }); return;
     case 'preview': return togglePreview(BE.sound);
     case 'sysSound': case 'fileSound': {
       const snd = await pickSound(d.be === 'fileSound' ? 'file' : 'system', BE.sound);
@@ -877,6 +910,247 @@ async function bulkClick(e) {
       } catch (err) { toast('Contact non récupéré'); }
       return;
   }
+}
+
+/* ---------- Mes photos (bibliothèque) ---------- */
+function inLibrary(data) { return (S.library || []).some(x => x.data === data); }
+
+function openPhotoPicker(onPick) {
+  let pk = $('#photoPicker');
+  if (!pk) { pk = document.createElement('div'); pk.id = 'photoPicker'; pk.className = 'sheet picker'; document.body.appendChild(pk); }
+  const chosen = new Set();
+  const draw = () => {
+    const lib = S.library || [];
+    pk.innerHTML = `<div class="sheet-head"><button data-pp="close">✕</button><h3>Mes photos</h3>
+        <button class="save" data-pp="ok" ${chosen.size ? '' : 'disabled'}>Ajouter${chosen.size ? ' (' + chosen.size + ')' : ''}</button></div>
+      <div class="sheet-body">
+        ${lib.length ? `<p class="note">Touche les photos à joindre à l’alarme.</p>
+          <div class="libgrid">${lib.map(ph => `<button class="libph ${chosen.has(ph.id) ? 'on' : ''}" data-pp-id="${ph.id}"><img src="${ph.data}" alt="">${chosen.has(ph.id) ? '<span>✓</span>' : ''}</button>`).join('')}</div>`
+        : '<p class="note">Aucune photo enregistrée pour l’instant. Ajoute ici celles que tu utilises souvent.</p>'}
+        <div class="btns"><button class="btn" data-pp="add">+ Ajouter des photos depuis le téléphone</button></div>
+        <input type="file" id="ppFile" accept="image/*" multiple hidden>
+      </div>`;
+  };
+  draw();
+  pk.hidden = false;
+  pk.onclick = async e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.pp === 'close') { pk.hidden = true; return; }
+    if (b.dataset.pp === 'add') { const i = $('#ppFile'); i.value = ''; i.click(); return; }
+    if (b.dataset.pp === 'ok') {
+      const list = S.library.filter(x => chosen.has(x.id)).map(x => x.data);
+      pk.hidden = true; onPick(list); return;
+    }
+    if (b.dataset.ppId) { const id = b.dataset.ppId; chosen.has(id) ? chosen.delete(id) : chosen.add(id); const y = pk.scrollTop; draw(); pk.scrollTop = y; }
+  };
+  pk.onchange = async e => {
+    if (e.target.id !== 'ppFile') return;
+    for (const f of e.target.files) {
+      try { const ph = { id: uid(), data: await compressImage(f), addedAt: Date.now() }; S.library.push(ph); chosen.add(ph.id); } catch (err) { toast('Photo illisible'); }
+    }
+    await saveLibrary(); draw();
+  };
+}
+
+/* ---------- Alarme rapide ---------- */
+const QUICK_IN = [5, 10, 15, 30, 60, 120];
+function quickDate(hhmm) {
+  const t = atTime(ymd(today0()), hhmm);
+  return t <= new Date() ? addDays(t, 1) : t;
+}
+function openQuick() {
+  let q = $('#quick');
+  if (!q) {
+    q = document.createElement('div'); q.id = 'quick'; q.className = 'qwrap'; document.body.appendChild(q);
+    q.addEventListener('click', quickClick);
+    q.addEventListener('input', e => { if (e.target.id === 'qTime') { S.quick.time = e.target.value; quickWhen(); } });
+  }
+  const n = new Date(Date.now() + 15 * 60000);
+  const m = Math.ceil(n.getMinutes() / 5) * 5;
+  n.setMinutes(m, 0, 0);
+  S.quick = { time: fmtTime(n), level: 'normal' };
+  q.innerHTML = `<div class="qsheet">
+      <div class="qhead"><b>⚡ Alarme rapide</b><button class="btn small" data-q="close">✕</button></div>
+      <input type="time" id="qTime" class="qtime" value="${S.quick.time}">
+      <div class="note qwhen" id="qWhen"></div>
+      <div class="chips qin">${QUICK_IN.map(mn => `<button class="chip" data-qin="${mn}">${mn < 60 ? 'dans ' + mn + ' min' : 'dans ' + mn / 60 + ' h'}</button>`).join('')}</div>
+      <input type="text" id="qTitle" placeholder="Raison (facultatif)" autocomplete="off">
+      <div class="levels" style="margin-top:10px">${LEVELS.map(l => `<button data-qlevel="${l.id}" class="${l.id === 'normal' ? 'on' : ''}" style="--c:${l.color}">${l.label}</button>`).join('')}</div>
+      <div class="btns">
+        <button class="btn" data-q="more">Plus d’options…</button>
+        <button class="btn primary" data-q="ok">Créer</button>
+      </div>
+    </div>`;
+  q.hidden = false;
+  quickWhen();
+}
+function quickWhen() {
+  const d = quickDate(S.quick.time || '07:30');
+  const el = $('#qWhen'); if (!el) return;
+  const mins = Math.round((d - Date.now()) / 60000);
+  el.textContent = `Sonnera ${relDay(d)} à ${fmtTime(d)} (dans ${mins >= 60 ? Math.floor(mins / 60) + ' h ' + pad(mins % 60) : mins + ' min'})`;
+}
+function quickAlarm() {
+  const d = quickDate(S.quick.time || '07:30');
+  const a = blankAlarm(ymd(d));
+  a.time = fmtTime(d);
+  a.title = ($('#qTitle').value || '').trim() || 'Alarme rapide';
+  a.level = S.quick.level;
+  return a;
+}
+async function quickClick(e) {
+  const q = $('#quick');
+  if (e.target === q) { q.hidden = true; return; }
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.q === 'close') { q.hidden = true; return; }
+  if (b.dataset.qin) {
+    const d = new Date(Date.now() + Number(b.dataset.qin) * 60000);
+    S.quick.time = fmtTime(d); $('#qTime').value = S.quick.time; quickWhen();
+    $$('[data-qin]', q).forEach(x => x.classList.toggle('on', x === b));
+    return;
+  }
+  if (b.dataset.qlevel) { S.quick.level = b.dataset.qlevel; $$('[data-qlevel]', q).forEach(x => x.classList.toggle('on', x === b)); return; }
+  if (b.dataset.q === 'ok') {
+    const a = quickAlarm();
+    S.alarms.push(a); q.hidden = true;
+    await saveAlarms(); render();
+    const n = nextOcc(a);
+    toastAction(`Alarme ${n ? relDay(n) + ' à ' + fmtTime(n) : 'créée'}`, 'Annuler', async () => { S.alarms = S.alarms.filter(x => x.id !== a.id); await saveAlarms(); render(); });
+    return;
+  }
+  if (b.dataset.q === 'more') {
+    const a = quickAlarm(); q.hidden = true;
+    if (a.title === 'Alarme rapide') a.title = '';
+    openEditor(null);
+    Object.assign(ED, { time: a.time, title: a.title, level: a.level, schedule: a.schedule });
+    ED._calMonth = new Date(parseYmd(a.schedule.dates[0]).getFullYear(), parseYmd(a.schedule.dates[0]).getMonth(), 1);
+    renderEditor();
+  }
+}
+
+/* ---------- Compte à rebours ---------- */
+function fmtDur(ms) {
+  const t = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+  const parts = [];
+  if (h) parts.push(h + ' h');
+  if (m) parts.push(m + ' min');
+  if (sec || !parts.length) parts.push(sec + ' s');
+  return parts.join(' ');
+}
+function fmtClock(ms) {
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
+const TIMER_PRESETS = [1, 3, 5, 10, 15, 20, 30, 45, 60, 90];
+const timerLeft = t => t.endAt ? t.endAt - Date.now() : t.remaining;
+
+function timerCardHTML(t) {
+  const left = timerLeft(t);
+  const done = t.endAt && left <= 0;
+  const pct = Math.max(0, Math.min(100, 100 * (1 - Math.max(0, left) / t.duration)));
+  return `<div class="card tcard ${done ? 'done' : ''} ${!t.endAt ? 'paused' : ''}" data-tid="${t.id}">
+      <div class="trow"><div class="tlabel">${esc(t.label || 'Compte à rebours')} · ${fmtDur(t.duration)}</div></div>
+      <div class="tclock" data-tclock="${t.id}">${done ? 'Terminé' : fmtClock(left)}</div>
+      <div class="tbar"><i data-tbar="${t.id}" style="width:${pct}%"></i></div>
+      <div class="tend note" data-tend="${t.id}">${done ? 'Terminé à ' + fmtTime(new Date(t.endAt)) : t.endAt ? 'Fin à ' + fmtTime(new Date(t.endAt)) : 'En pause'}</div>
+      <div class="btns">
+        ${done ? `<button class="btn" data-t="restart">↻ Relancer</button><button class="btn primary" data-t="dismiss">OK</button>` : `
+        <button class="btn" data-t="plus">+1 min</button>
+        <button class="btn" data-t="${t.endAt ? 'pause' : 'resume'}">${t.endAt ? '⏸ Pause' : '▶ Reprendre'}</button>
+        <button class="btn danger" data-t="cancel">Annuler</button>`}
+      </div>
+    </div>`;
+}
+
+function renderTimers(v) {
+  const tm = S.timerForm || (S.timerForm = { h: 0, m: 10, s: 0, label: '' });
+  const running = S.timers || [];
+  v.innerHTML = `
+    ${running.length ? `<h2>En cours</h2>${running.map(timerCardHTML).join('')}` : ''}
+    <h2>Nouveau compte à rebours</h2>
+    <div class="card">
+      <div class="chips">${TIMER_PRESETS.map(mn => `<button class="chip" data-tp="${mn}">${mn < 60 ? mn + ' min' : Math.floor(mn / 60) + ' h' + (mn % 60 ? ' ' + (mn % 60) : '')}</button>`).join('')}</div>
+      <div class="hms">
+        <label><input type="number" id="tH" min="0" max="23" value="${tm.h}"><span>h</span></label>
+        <label><input type="number" id="tM" min="0" max="59" value="${tm.m}"><span>min</span></label>
+        <label><input type="number" id="tS" min="0" max="59" value="${tm.s}"><span>s</span></label>
+      </div>
+      <input type="text" id="tLabel" placeholder="Nom (facultatif) : pâtes, lessive, pause…" value="${esc(tm.label)}" style="margin-top:10px" autocomplete="off">
+      <div class="btns"><button class="btn primary" data-t="start">▶ Démarrer</button></div>
+      <p class="note">Le compte à rebours sonne comme une alarme, même téléphone verrouillé ou appli fermée (son et durée de sonnerie par défaut).</p>
+    </div>`;
+}
+
+function readTimerForm() {
+  const g = id => Math.max(0, Math.floor(Number(($('#' + id) || {}).value) || 0));
+  S.timerForm = { h: Math.min(23, g('tH')), m: Math.min(59, g('tM')), s: Math.min(59, g('tS')), label: (($('#tLabel') || {}).value || '').trim() };
+}
+
+async function startTimer(ms, label) {
+  if (ms < 1000) { toast('Indique une durée'); return; }
+  const t = { id: uid(), label, duration: ms, endAt: Date.now() + ms, remaining: ms, createdAt: Date.now() };
+  S.timers.unshift(t);
+  await saveTimers();
+  if (S.tab === 'timer') render();
+  toast(`Compte à rebours lancé : fin à ${fmtTime(new Date(t.endAt))}`);
+}
+
+async function timerAction(act, t) {
+  if (act === 'pause') { t.remaining = Math.max(0, t.endAt - Date.now()); t.endAt = null; }
+  else if (act === 'resume') { t.endAt = Date.now() + t.remaining; t.rang = false; }
+  else if (act === 'plus') { if (t.endAt) t.endAt += 60000; else t.remaining += 60000; t.duration += 60000; }
+  else if (act === 'cancel' || act === 'dismiss') { S.timers = S.timers.filter(x => x.id !== t.id); }
+  else if (act === 'restart') { t.endAt = Date.now() + t.duration; t.remaining = t.duration; t.rang = false; }
+  await saveTimers();
+  keepScroll(render);
+}
+
+function bindTimers() {
+  const v = $('#view');
+  v.addEventListener('click', async e => {
+    if (S.tab !== 'timer') return;
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.tp) {
+      const mn = Number(b.dataset.tp);
+      readTimerForm();
+      await startTimer(mn * 60000, S.timerForm.label);
+      return;
+    }
+    if (b.dataset.t === 'start') {
+      readTimerForm();
+      const f = S.timerForm;
+      await startTimer(((f.h * 60 + f.m) * 60 + f.s) * 1000, f.label);
+      return;
+    }
+    const card = b.closest('[data-tid]');
+    if (card && b.dataset.t) {
+      const t = S.timers.find(x => x.id === card.dataset.tid);
+      if (t) await timerAction(b.dataset.t, t);
+    }
+  });
+  v.addEventListener('change', e => { if (S.tab === 'timer' && /^t(H|M|S|Label)$/.test(e.target.id)) readTimerForm(); });
+  // Mise à jour de l'affichage chaque seconde
+  setInterval(() => {
+    if (!(S.timers || []).length) return;
+    if (!isNative) webTick();
+    if (S.tab !== 'timer' || document.hidden) return;
+    let needFull = false;
+    for (const t of S.timers) {
+      const left = timerLeft(t);
+      const c = $(`[data-tclock="${t.id}"]`);
+      if (!c) { needFull = true; continue; }
+      if (t.endAt && left <= 0) { if (c.textContent !== 'Terminé') needFull = true; continue; }
+      c.textContent = fmtClock(left);
+      const bar = $(`[data-tbar="${t.id}"]`);
+      if (bar) bar.style.width = Math.max(0, Math.min(100, 100 * (1 - Math.max(0, left) / t.duration))) + '%';
+    }
+    if (needFull) keepScroll(render);
+  }, 1000);
 }
 
 /* ---------- Composant calendrier ---------- */
@@ -1041,10 +1315,12 @@ function renderEditor() {
 
     <label class="f">Photos</label>
     <div class="photos">
-      ${a.photos.map((p, i) => `<div class="ph"><img src="${p}" alt=""><button class="x" data-delphoto="${i}">✕</button></div>`).join('')}
-      <button class="add" data-ed="photo">+</button>
+      ${a.photos.map((p, i) => `<div class="ph"><img src="${p}" alt=""><button class="x" data-delphoto="${i}">✕</button>${inLibrary(p) ? '<span class="star on" title="Dans Mes photos">★</span>' : `<button class="star" data-ed="savelib" data-i="${i}" title="Enregistrer dans Mes photos">☆</button>`}</div>`).join('')}
+      <button class="add" data-ed="photo" title="Depuis le téléphone">+</button>
+      <button class="add lib" data-ed="library">📚<small>Mes photos</small></button>
     </div>
     <input type="file" id="edPhotoInput" accept="image/*" multiple hidden>
+    <p class="note">☆ = garder la photo dans « Mes photos » pour la réutiliser.</p>
 
     <label class="f">Contact</label>
     ${a.contact ? `<div class="attach"><span>👤</span><div class="t"><b>${esc(a.contact.name || 'Contact')}</b><small>${esc([a.contact.phone, a.contact.email].filter(Boolean).join(' · '))}</small></div><button class="btn small" data-ed="delcontact">Retirer</button></div>` : ''}
@@ -1336,6 +1612,19 @@ async function editorAction(act, el) {
       return;
     case 'preview': togglePreview(effRing(ED).sound); return;
     case 'photo': $('#edPhotoInput').click(); return;
+    case 'library':
+      openPhotoPicker(list => {
+        if (!ED) return;
+        ED.photos.push(...list);
+        const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y;
+      });
+      return;
+    case 'savelib': {
+      const ph = ED.photos[Number(el.dataset.i)];
+      if (ph && !inLibrary(ph)) { S.library.push({ id: uid(), data: ph, addedAt: Date.now() }); await saveLibrary(); toast('Ajoutée à Mes photos'); }
+      const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y;
+      return;
+    }
     case 'pickcontact':
       try {
         const r = await Native.pickContact();
@@ -1981,7 +2270,7 @@ function backupDue() {
 async function doBackup() {
   const settings = Object.assign({}, S.settings);
   delete settings.lastBackup; delete settings.lastBackupName; delete settings.lastBackupUri;
-  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings };
+  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings, library: S.library || [] };
   const content = JSON.stringify(data);
   const name = `alarmes-sauvegarde-${ymd(new Date())}.json`;
   let savedName = name, savedUri = '';
@@ -2023,6 +2312,12 @@ async function doRestore(file, mode) {
   try { data = JSON.parse(await file.text()); } catch (e) { toast('Fichier illisible'); return; }
   if (!data || data.app !== 'alarmes' || !Array.isArray(data.alarms)) { toast('Ce fichier n’est pas une sauvegarde d’Alarmes'); return; }
   const incoming = data.alarms.filter(a => a && a.id && a.schedule);
+  if (Array.isArray(data.library)) {
+    const have = new Set((S.library || []).map(x => x.id));
+    let n = 0;
+    for (const ph of data.library) if (ph && ph.id && ph.data && !have.has(ph.id)) { S.library.push(ph); n++; }
+    if (n) await saveLibrary();
+  }
   if (mode === 'replace') {
     if (!confirm(`Remplacer tes ${S.alarms.length} alarme(s) par les ${incoming.length} de la sauvegarde du ${(data.exportedAt || '').slice(0, 10)} ?`)) return;
     S.alarms = incoming;
@@ -2094,6 +2389,16 @@ async function renderSettings(v) {
     <h2>Modifier ou supprimer en groupe</h2>
     <div class="card note">Onglet Alarmes : cherche un mot, touche « Sélectionner », puis « Tout sélectionner ». Tu peux ensuite modifier, activer, désactiver ou supprimer toutes ces alarmes d’un coup.</div>
 
+    <h2>Mes photos</h2>
+    <div class="card">
+      <p class="note" style="margin-top:0">Photos souvent utilisées, proposées dans chaque alarme (bouton 📚). Comprises dans la sauvegarde.</p>
+      <div class="photos">
+        ${(S.library || []).map(ph => `<div class="ph"><img src="${ph.data}" alt=""><button class="x" data-libdel="${ph.id}">✕</button></div>`).join('')}
+        <button class="add" data-set="libadd">+</button>
+      </div>
+      <input type="file" id="libFile" accept="image/*" multiple hidden>
+    </div>
+
     <h2>Préférences</h2>
     <div class="card">
       <label class="f">Heure par défaut d'une nouvelle alarme</label>
@@ -2154,6 +2459,11 @@ function bindSettings() {
     if (b.dataset.set === 'webnotif') { await Notification.requestPermission(); render(); }
     if (b.dataset.set === 'backup') { await doBackup(); return; }
     if (b.dataset.set === 'sharebackup') { await shareBackup(); return; }
+    if (b.dataset.set === 'libadd') { const i = $('#libFile'); i.value = ''; i.click(); return; }
+    if (b.dataset.libdel) {
+      if (!confirm('Retirer cette photo de « Mes photos » ? (Les alarmes qui l’utilisent la gardent.)')) return;
+      S.library = S.library.filter(x => x.id !== b.dataset.libdel); await saveLibrary(); keepScroll(render); return;
+    }
     if (b.dataset.set === 'restore' || b.dataset.set === 'merge') {
       S.restoreMode = b.dataset.set === 'restore' ? 'replace' : 'merge';
       const inp = $('#restoreFile'); inp.value = ''; inp.click();
@@ -2164,6 +2474,12 @@ function bindSettings() {
     if (S.tab !== 'settings') return;
     if (e.target.id === 'setSnooze') { S.settings.snoozeMin = Number(e.target.value); await saveSettings(); toast('Snooze : ' + e.target.value + ' min'); }
     if (e.target.id === 'setDefTime') { S.settings.defaultTime = e.target.value || '07:30'; await saveSettings(); }
+    if (e.target.id === 'libFile') {
+      let n = 0;
+      for (const f of e.target.files) { try { S.library.push({ id: uid(), data: await compressImage(f), addedAt: Date.now() }); n++; } catch (err) { toast('Photo illisible'); } }
+      await saveLibrary(); keepScroll(render); if (n) toast(`${n} photo(s) ajoutée(s) à Mes photos`);
+      return;
+    }
     if (e.target.id === 'restoreFile' && e.target.files[0]) { await doRestore(e.target.files[0], S.restoreMode || 'merge'); return; }
     if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
     if (e.target.id === 'setFade') { S.settings.fadeSec = Number(e.target.value); await saveSettings(); toast('Volume progressif : ' + fadeLabel(e.target.value).toLowerCase()); }
@@ -2181,6 +2497,7 @@ function bindSettings() {
 function bindMain() {
   $$('.tabs button').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   $('#fab').addEventListener('click', () => openEditor(null, S.tab === 'calendar' ? S.calSel : null));
+  $('#fabQuick').addEventListener('click', openQuick);
   const v = $('#view');
   // Appui long = sélection ; glisser vers la gauche = suppression
   let press = null, suppressClick = false;
@@ -2300,7 +2617,7 @@ async function handleOpenAlarm(id) {
 
 async function start() {
   await loadAll();
-  bindMain(); bindSheet(); bindImport(); bindSettings();
+  bindMain(); bindSheet(); bindImport(); bindSettings(); bindTimers();
   if (!isNative) {
     const b = $('#modeBadge'); b.hidden = false; b.textContent = 'navigateur';
   }

@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -599,6 +599,7 @@ function renderListBody() {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  if (S.update && !S.selMode) html += `<div class="card banner upd" data-goupdate="1">⬆️ <b>Nouvelle version ${esc(S.update.version)} disponible</b><div class="note">Touche ici pour mettre à jour (tes alarmes sont conservées).</div></div>`;
   if (backupDue() && !S.selMode) html += `<div class="card banner" data-gobackup="1">💾 <b>Pense à sauvegarder tes alarmes</b><div class="note">${backupStatus()} Touche ici pour le faire.</div></div>`;
   if (S.search.trim()) html += `<p class="note" style="margin:0 4px 8px">${items.length} résultat${items.length > 1 ? 's' : ''} pour « ${esc(S.search.trim())} »</p>`;
   if (S.selMode) {
@@ -909,6 +910,48 @@ async function bulkClick(e) {
         if (r && !r.cancelled) { BE.ctName = r.name || ''; BE.ctPhone = r.phone || ''; rerender(); }
       } catch (err) { toast('Contact non récupéré'); }
       return;
+  }
+}
+
+/* ---------- Mise à jour intégrée ---------- */
+const RELEASES_API = 'https://api.github.com/repos/ChrisSorbadere/alarmes/releases/latest';
+async function checkUpdate(force) {
+  if (!Native) return null;
+  try {
+    if (!S.build) { const info = await Native.appInfo(); S.build = Number(info.versionCode) || 0; }
+    const last = Number(S.settings.lastUpdateCheck || 0);
+    if (!force && Date.now() - last < 6 * 3600000) return S.update || null;
+    const r = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rel = await r.json();
+    const m = String(rel.tag_name || '').match(/^v?([\d.]+)-b(\d+)$/);
+    const asset = (rel.assets || []).find(a => /\.apk$/i.test(a.name));
+    S.lastUpdateCheck = Date.now();
+    S.settings.lastUpdateCheck = S.lastUpdateCheck;
+    await DB.set('settings', S.settings);
+    S.update = (m && asset && Number(m[2]) > S.build) ? { version: m[1], build: Number(m[2]), url: asset.browser_download_url, name: asset.name } : null;
+    return S.update;
+  } catch (e) {
+    if (force) toast('Vérification impossible : ' + (e.message || e));
+    return S.update || null;
+  }
+}
+let updating = false;
+async function installUpdate() {
+  if (!Native || updating) return;
+  const u = S.update || await checkUpdate(true);
+  if (!u) { toast('Tu as la dernière version'); return; }
+  updating = true;
+  toast(`Téléchargement de la version ${u.version}…`, 60000);
+  const h = await Native.addListener('updateProgress', p => { if (p.percent >= 0) toast(`Téléchargement : ${p.percent} %`, 60000); });
+  try {
+    await Native.downloadAndInstall({ url: u.url, name: u.name });
+    toast('Touche « Mettre à jour » dans la fenêtre d’Android', 5000);
+  } catch (e) {
+    toast(e.code === 'NEED_PERMISSION' ? 'Autorise « Installer des applis inconnues » pour Alarmes, reviens et touche à nouveau Mettre à jour' : (e.message || String(e)), 7000);
+  } finally {
+    updating = false;
+    try { h.remove(); } catch (e) { /* ignore */ }
   }
 }
 
@@ -2420,6 +2463,16 @@ async function renderSettings(v) {
 
     <h2>À venir</h2>
     <div class="card note">Lecture directe d’un fichier sur Drive, sans passer par le sélecteur de fichiers.</div>
+    ${isNative ? `<h2>Mise à jour</h2>
+    <div class="card">
+      <p class="note" style="margin-top:0">Version installée : ${VERSION}${S.build ? ' (build ' + S.build + ')' : ''}.
+        ${S.update ? `<b>Version ${esc(S.update.version)} disponible.</b>` : S.lastUpdateCheck ? 'À jour (vérifié ' + relDay(new Date(S.lastUpdateCheck)) + ' à ' + fmtTime(new Date(S.lastUpdateCheck)) + ').' : ''}</p>
+      <div class="btns" style="margin-top:0">
+        ${S.update ? '<button class="btn primary" data-set="doupdate">⬆️ Mettre à jour</button>' : ''}
+        <button class="btn${S.update ? '' : ' primary'}" data-set="checkupdate">Vérifier maintenant</button>
+      </div>
+      <p class="note">La vérification se fait toute seule à l’ouverture (au plus toutes les 6 h). La première fois, Android demande d’autoriser Alarmes à installer des applis.</p>
+    </div>` : ''}
     <p class="note" style="text-align:center;margin-top:20px">Alarmes v${VERSION} · ${S.alarms.length} alarme(s)</p>`;
 }
 
@@ -2459,6 +2512,8 @@ function bindSettings() {
     if (b.dataset.set === 'webnotif') { await Notification.requestPermission(); render(); }
     if (b.dataset.set === 'backup') { await doBackup(); return; }
     if (b.dataset.set === 'sharebackup') { await shareBackup(); return; }
+    if (b.dataset.set === 'checkupdate') { toast('Recherche d’une mise à jour…'); const u = await checkUpdate(true); keepScroll(render); toast(u ? `Version ${u.version} disponible` : 'Tu as la dernière version'); return; }
+    if (b.dataset.set === 'doupdate') { installUpdate(); return; }
     if (b.dataset.set === 'libadd') { const i = $('#libFile'); i.value = ''; i.click(); return; }
     if (b.dataset.libdel) {
       if (!confirm('Retirer cette photo de « Mes photos » ? (Les alarmes qui l’utilisent la gardent.)')) return;
@@ -2565,6 +2620,7 @@ function bindMain() {
   });
   v.addEventListener('click', async e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
+    if (e.target.closest('[data-goupdate]')) { installUpdate(); return; }
     if (e.target.closest('[data-gobackup]')) { go('settings'); setTimeout(() => { const el = $('[data-set="backup"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     const sb = e.target.closest('[data-sel]');
     if (sb && (S.tab === 'list' || S.tab === 'calendar')) {
@@ -2623,6 +2679,8 @@ async function start() {
   }
   go('list');
   if (await syncEvents()) render();
+  S.lastUpdateCheck = Number(S.settings.lastUpdateCheck || 0) || null;
+  checkUpdate(false).then(u => { if (u && S.tab === 'list') refreshView(); });
   await syncNative();
   if (Native) {
     try {

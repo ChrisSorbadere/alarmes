@@ -36,8 +36,21 @@ jobs:
           sed -i "s/versionName \"[^\"]*\"/versionName \"$V\"/" android/app/build.gradle
           echo "APP_VERSION=$V" >> $GITHUB_ENV
 
+      - name: Clé de signature (secrets GitHub)
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$KP" ]; then
+            echo "::error::Secrets ANDROID_KEYSTORE_BASE64 et ANDROID_KEYSTORE_PASSWORD manquants (Settings › Secrets and variables › Actions)"
+            exit 1
+          fi
+          echo "$KS" | base64 -d > android/app/release.jks
+
       - name: Compiler l'APK signé
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           chmod +x gradlew
           set -o pipefail

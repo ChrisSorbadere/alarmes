@@ -18,10 +18,11 @@ android {
     }
     signingConfigs {
         release {
-            storeFile file("alarmes.jks")
-            storePassword "***SUPPRIME***"
+            // Clé fournie par GitHub Actions (secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD)
+            storeFile file("release.jks")
+            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
             keyAlias "alarmes"
-            keyPassword "***SUPPRIME***"
+            keyPassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
         }
     }
     lint {

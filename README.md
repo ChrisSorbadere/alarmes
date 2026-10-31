@@ -10,4 +10,4 @@ Appli Android d'alarmes sur mesure : dates choisies sur un calendrier, répétit
 Ouvrir la page **Releases** du dépôt sur le téléphone, télécharger le dernier `Alarmes-….apk`, l'ouvrir et autoriser l'installation.
 
 ## Mettre à jour
-Modifier `docs/`, incrémenter `VERSION` dans `docs/app.js`, pousser : l'APK suivant s'installe par-dessus (même clé de signature `android/app/alarmes.jks`).
+Modifier `docs/`, incrémenter `VERSION` dans `docs/app.js`, pousser : l'APK suivant s'installe par-dessus (même clé de signature, stockée dans les secrets GitHub du dépôt).

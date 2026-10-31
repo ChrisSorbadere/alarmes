@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -747,7 +747,7 @@ function renderBulk() {
 
     <label class="f">Heure</label>
     ${seg('time', b.timeMode, [['keep', 'Ne pas changer'], ['set', 'Fixer à'], ['shift', 'Décaler']])}
-    ${b.timeMode === 'set' ? `<input type="time" id="beTime" value="${esc(b.timeValue)}" style="margin-top:8px">` : ''}
+    ${b.timeMode === 'set' ? `<div style="margin-top:8px">${wheelTimeHTML('beTime', b.timeValue)}</div>` : ''}
     ${b.timeMode === 'shift' ? `<div class="row" style="margin-top:8px"><input type="number" id="beShift" value="${esc(b.timeShift)}" placeholder="ex. -30"><span style="flex:none">minutes</span></div><p class="note">Négatif = plus tôt. Passer minuit change aussi le jour.</p>` : ''}
 
     <label class="f">Décaler les dates</label>
@@ -913,6 +913,90 @@ async function bulkClick(e) {
   }
 }
 
+/* ---------- Rouleaux de sélection (heures, minutes, secondes) ---------- */
+const W_ITEM = 44, W_COPIES = 5;
+function wheelCol(part, n, sel, target) {
+  let items = '';
+  for (let c = 0; c < W_COPIES; c++) for (let i = 0; i < n; i++) items += `<div class="witem" data-i="${c * n + i}">${pad(i)}</div>`;
+  return `<div class="wcol" data-part="${part}" data-n="${n}" data-sel="${sel}" ${target ? `data-target="${target}"` : ''}><div class="wpad"></div>${items}<div class="wpad"></div></div>`;
+}
+/** Heure « HH:MM » : un rouleau pour les heures, un pour les minutes. */
+function wheelTimeHTML(id, val, disabled) {
+  const [h, m] = String(val || '07:30').split(':').map(Number);
+  return `<div class="wheel ${disabled ? 'off' : ''}" data-kind="time" data-for="${id}">
+      <div class="wband"></div>${wheelCol('h', 24, h || 0)}<div class="wsep">:</div>${wheelCol('m', 60, m || 0)}
+    </div><input type="hidden" id="${id}" value="${pad(h || 0)}:${pad(m || 0)}">`;
+}
+/** Durée : rouleaux heures, minutes, secondes (chacun écrit dans son champ caché). */
+function wheelHMSHTML(ids, vals) {
+  return `<div class="wheel" data-kind="multi">
+      <div class="wband"></div>
+      ${wheelCol('h', 24, vals[0], ids[0])}<div class="wunit">h</div>
+      ${wheelCol('m', 60, vals[1], ids[1])}<div class="wunit">min</div>
+      ${wheelCol('s', 60, vals[2], ids[2])}<div class="wunit">s</div>
+    </div>${ids.map((id, i) => `<input type="hidden" id="${id}" value="${vals[i]}">`).join('')}`;
+}
+function wheelColValue(col) { return Number(col.dataset.sel) || 0; }
+function wheelPlace(col, v, smooth) {
+  const n = Number(col.dataset.n);
+  const top = (2 * n + v) * W_ITEM;
+  if (smooth) col.scrollTo({ top, behavior: 'smooth' }); else col.scrollTop = top;
+  col.dataset.sel = v;
+  $$('.witem.sel', col).forEach(x => x.classList.remove('sel'));
+  $$(`.witem[data-i="${2 * n + v}"]`, col).forEach(x => x.classList.add('sel'));
+}
+function wheelCommit(wheel) {
+  const fire = inp => { inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new Event('change', { bubbles: true })); };
+  if (wheel.dataset.kind === 'time') {
+    const inp = document.getElementById(wheel.dataset.for);
+    const cols = $$('.wcol', wheel);
+    const v = `${pad(wheelColValue(cols[0]))}:${pad(wheelColValue(cols[1]))}`;
+    if (inp && inp.value !== v) { inp.value = v; fire(inp); }
+  } else {
+    for (const col of $$('.wcol', wheel)) {
+      const inp = document.getElementById(col.dataset.target);
+      const v = String(wheelColValue(col));
+      if (inp && inp.value !== v) { inp.value = v; fire(inp); }
+    }
+  }
+}
+function wheelInit(wheel) {
+  wheel.dataset.init = '1';
+  for (const col of $$('.wcol', wheel)) {
+    const n = Number(col.dataset.n);
+    wheelPlace(col, Number(col.dataset.sel) || 0, false);
+    let t = null;
+    col.addEventListener('scroll', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        const idx = Math.round(col.scrollTop / W_ITEM);
+        const v = ((idx % n) + n) % n;
+        if (idx < n || idx >= (W_COPIES - 1) * n || Math.abs(col.scrollTop - idx * W_ITEM) > 2) wheelPlace(col, v, false);
+        else {
+          col.dataset.sel = v;
+          $$('.witem.sel', col).forEach(x => x.classList.remove('sel'));
+          const it = $(`.witem[data-i="${idx}"]`, col); if (it) it.classList.add('sel');
+        }
+        wheelCommit(wheel);
+      }, 110);
+    }, { passive: true });
+    col.addEventListener('click', e => {
+      const it = e.target.closest('.witem');
+      if (it) col.scrollTo({ top: Number(it.dataset.i) * W_ITEM, behavior: 'smooth' });
+    });
+  }
+}
+/** Met à jour un rouleau d'heure depuis le code (ex. raccourcis « dans 30 min »). */
+function wheelSet(id, val) {
+  const inp = document.getElementById(id); if (inp) inp.value = val;
+  const w = document.querySelector(`.wheel[data-for="${id}"]`); if (!w) return;
+  const [h, m] = val.split(':').map(Number);
+  const cols = $$('.wcol', w);
+  wheelPlace(cols[0], h, true); wheelPlace(cols[1], m, true);
+}
+new MutationObserver(() => { $$('.wheel:not([data-init])').forEach(wheelInit); })
+  .observe(document.documentElement, { childList: true, subtree: true });
+
 /* ---------- Mise à jour intégrée ---------- */
 const RELEASES_API = 'https://api.github.com/repos/ChrisSorbadere/alarmes/releases/latest';
 async function checkUpdate(force) {
@@ -1015,7 +1099,7 @@ function openQuick() {
   S.quick = { time: fmtTime(n), level: 'normal' };
   q.innerHTML = `<div class="qsheet">
       <div class="qhead"><b>⚡ Alarme rapide</b><button class="btn small" data-q="close">✕</button></div>
-      <input type="time" id="qTime" class="qtime" value="${S.quick.time}">
+      ${wheelTimeHTML('qTime', S.quick.time)}
       <div class="note qwhen" id="qWhen"></div>
       <div class="chips qin">${QUICK_IN.map(mn => `<button class="chip" data-qin="${mn}">${mn < 60 ? 'dans ' + mn + ' min' : 'dans ' + mn / 60 + ' h'}</button>`).join('')}</div>
       <input type="text" id="qTitle" placeholder="Raison (facultatif)" autocomplete="off">
@@ -1050,7 +1134,7 @@ async function quickClick(e) {
   if (b.dataset.q === 'close') { q.hidden = true; return; }
   if (b.dataset.qin) {
     const d = new Date(Date.now() + Number(b.dataset.qin) * 60000);
-    S.quick.time = fmtTime(d); $('#qTime').value = S.quick.time; quickWhen();
+    S.quick.time = fmtTime(d); wheelSet('qTime', S.quick.time); quickWhen();
     $$('[data-qin]', q).forEach(x => x.classList.toggle('on', x === b));
     return;
   }
@@ -1117,11 +1201,7 @@ function renderTimers(v) {
     <h2>Nouveau compte à rebours</h2>
     <div class="card">
       <div class="chips">${TIMER_PRESETS.map(mn => `<button class="chip" data-tp="${mn}">${mn < 60 ? mn + ' min' : Math.floor(mn / 60) + ' h' + (mn % 60 ? ' ' + (mn % 60) : '')}</button>`).join('')}</div>
-      <div class="hms">
-        <label><input type="number" id="tH" min="0" max="23" value="${tm.h}"><span>h</span></label>
-        <label><input type="number" id="tM" min="0" max="59" value="${tm.m}"><span>min</span></label>
-        <label><input type="number" id="tS" min="0" max="59" value="${tm.s}"><span>s</span></label>
-      </div>
+      ${wheelHMSHTML(['tH', 'tM', 'tS'], [tm.h, tm.m, tm.s])}
       <input type="text" id="tLabel" placeholder="Nom (facultatif) : pâtes, lessive, pause…" value="${esc(tm.label)}" style="margin-top:10px" autocomplete="off">
       <div class="btns"><button class="btn primary" data-t="start">▶ Démarrer</button></div>
       <p class="note">Le compte à rebours sonne comme une alarme, même téléphone verrouillé ou appli fermée (son et durée de sonnerie par défaut).</p>
@@ -1322,14 +1402,13 @@ function renderEditor() {
     <label class="f">Raison / description (affichée en entier quand ça sonne)</label>
     <textarea id="edDesc" placeholder="Tout ce que tu veux te rappeler…">${esc(a.description)}</textarea>
 
-    <div class="row">
-      <div><label class="f">Heure</label><input type="time" id="edTime" value="${esc(a.time)}" ${a.event ? 'disabled' : ''}></div>
-      <div><label class="f">Type</label>
-        <select id="edMode">
-          <option value="alarm" ${a.mode !== 'notif' ? 'selected' : ''}>Sonnerie d'alarme</option>
-          <option value="notif" ${a.mode === 'notif' ? 'selected' : ''}>Rappel discret</option>
-        </select></div>
-    </div>
+    <label class="f">Heure${a.event ? ' (suit l’événement lié)' : ''}</label>
+    ${wheelTimeHTML('edTime', a.time, !!a.event)}
+    <label class="f">Type</label>
+    <select id="edMode">
+      <option value="alarm" ${a.mode !== 'notif' ? 'selected' : ''}>Sonnerie d'alarme</option>
+      <option value="notif" ${a.mode === 'notif' ? 'selected' : ''}>Rappel discret</option>
+    </select>
 
     ${a.mode !== 'notif' ? editorRingHTML(a) : ''}
 
@@ -2184,8 +2263,8 @@ function renderImport(v) {
         <button data-rm="before" class="${I.remind === 'before' ? 'on' : ''}">Avant le cours</button>
       </div>
       <div style="margin-top:10px">
-        ${I.remind === 'veille' ? `<label class="f">Heure, la veille</label><input type="time" id="impVeille" value="${I.veilleTime}">` : ''}
-        ${I.remind === 'day' ? `<label class="f">Heure, le jour même</label><input type="time" id="impDay" value="${I.dayTime}">` : ''}
+        ${I.remind === 'veille' ? `<label class="f">Heure, la veille</label>${wheelTimeHTML('impVeille', I.veilleTime)}` : ''}
+        ${I.remind === 'day' ? `<label class="f">Heure, le jour même</label>${wheelTimeHTML('impDay', I.dayTime)}` : ''}
         ${I.remind === 'before' ? `<label class="f">Minutes avant le début du créneau</label><input type="number" id="impBefore" min="1" max="600" value="${I.beforeMin}">` : ''}
       </div>
     </div>
@@ -2445,7 +2524,7 @@ async function renderSettings(v) {
     <h2>Préférences</h2>
     <div class="card">
       <label class="f">Heure par défaut d'une nouvelle alarme</label>
-      <input type="time" id="setDefTime" value="${S.settings.defaultTime}">
+      ${wheelTimeHTML('setDefTime', S.settings.defaultTime)}
     </div>
 
     <h2>Sauvegarde</h2>

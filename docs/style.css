@@ -319,3 +319,18 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .hms label { display: flex; align-items: center; gap: 4px; }
 .hms input { text-align: center; font-size: 22px; font-weight: 700; }
 .hms span { color: var(--muted); font-size: 13px; }
+
+/* Rouleaux */
+.wheel { position: relative; display: flex; align-items: center; justify-content: center; gap: 4px;
+  height: 132px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; user-select: none; -webkit-user-select: none; }
+.wheel.off { opacity: .5; pointer-events: none; }
+.wband { position: absolute; left: 10px; right: 10px; top: 44px; height: 44px; border-radius: 10px; background: var(--soft); pointer-events: none; }
+.wcol { position: relative; height: 132px; width: 76px; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent); mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent); }
+.wcol::-webkit-scrollbar { display: none; }
+.wpad { height: 44px; }
+.witem { height: 44px; line-height: 44px; text-align: center; font-size: 24px; font-variant-numeric: tabular-nums; color: var(--muted); scroll-snap-align: center; cursor: pointer; }
+.witem.sel { color: var(--ink); font-weight: 800; font-size: 30px; }
+.wsep { position: relative; font-size: 28px; font-weight: 800; }
+.wunit { position: relative; color: var(--muted); font-size: 13px; margin-right: 6px; }
+.wheel[data-kind="multi"] .wcol { width: 58px; }

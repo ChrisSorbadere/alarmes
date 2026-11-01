@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -2090,6 +2090,8 @@ function newImportState(parsed) {
     sourceName: parsed.name,
   });
   setupImportSheet();
+  const M = S.imp.map;
+  if (M.time !== undefined && M.group === undefined && M.type === undefined) S.imp.remind = 'exact';
 }
 
 function rowKind(t) {
@@ -2128,7 +2130,8 @@ function buildCandidates() {
     const eventAt = startTime ? atTime(ymd(eventDay), startTime) : null;
 
     let ringDay = eventDay, ringTime, prefix;
-    if (I.remind === 'veille') { ringDay = addDays(eventDay, -1); ringTime = I.veilleTime; prefix = 'Demain'; }
+    if (I.remind === 'exact') { ringTime = startTime || I.dayTime; prefix = ''; }
+    else if (I.remind === 'veille') { ringDay = addDays(eventDay, -1); ringTime = I.veilleTime; prefix = 'Demain'; }
     else if (I.remind === 'day') { ringTime = I.dayTime; prefix = "Aujourd'hui"; }
     else {
       const base = eventAt || atTime(ymd(eventDay), I.dayTime);
@@ -2142,16 +2145,22 @@ function buildCandidates() {
     const desc = cellText(g(r, 'desc'));
     const what = kind === 'star' && M.type !== undefined ? 'évaluation' : kind === 'int' ? 'interrogation' : '';
     const label = [title, grp].filter(Boolean).join(' · ') || desc.slice(0, 50) || 'Rappel';
-    const fullTitle = `${prefix} : ${what ? what + ' ' : ''}${label}`;
+    const fullTitle = prefix ? `${prefix} : ${what ? what + ' ' : ''}${label}` : `${what ? capital(what) + ' ' : ''}${label}`;
     const when = `${capital(fmtDate(eventDay))} ${eventDay.getFullYear()}${slot ? ' · ' + slot : ''}${room ? ' · salle ' + room.replace(/^salle\s*/i, '') : ''}`;
     const description = when + (desc ? '\n\n' + desc : '');
-    const key = (title || grp) ? [grp, title, M.type !== undefined ? kind : ''].join('|') : ymd(eventDay) + '|' + label;
+    const key = I.remind === 'exact' ? [ymd(eventDay), ringTime, label].join('|')
+      : (title || grp) ? [grp, title, M.type !== undefined ? kind : ''].join('|') : ymd(eventDay) + '|' + label;
     const level = I.colors[kind] || 'normal';
     out.push({ key, title: fullTitle, description, date: ymd(ringDay), time: ringTime, level, place: room ? { label: /^\d/.test(room) ? 'Salle ' + room : room, url: '' } : null, eventDay: ymd(eventDay) });
   }
   // clés en double (même séance listée deux fois) : on rend la clé unique avec la date
   const seen = {};
-  for (const c of out) { if (seen[c.key]) c.key += '|' + c.eventDay; seen[c.key] = 1; }
+  for (const c of out) {
+    if (seen[c.key]) c.key += '|' + c.eventDay;
+    let k = c.key, n = 2;
+    while (seen[k]) k = c.key + '#' + n++;
+    c.key = k; seen[k] = 1;
+  }
   return { list: out, skipped };
 }
 
@@ -2258,11 +2267,13 @@ function renderImport(v) {
     <div class="step card">
       <h4>Quand sonner</h4>
       <div class="seg" id="impRemind">
+        ${I.map.time !== undefined ? `<button data-rm="exact" class="${I.remind === 'exact' ? 'on' : ''}">À l’heure du fichier</button>` : ''}
         <button data-rm="veille" class="${I.remind === 'veille' ? 'on' : ''}">La veille</button>
         <button data-rm="day" class="${I.remind === 'day' ? 'on' : ''}">Le jour même</button>
         <button data-rm="before" class="${I.remind === 'before' ? 'on' : ''}">Avant le cours</button>
       </div>
       <div style="margin-top:10px">
+        ${I.remind === 'exact' ? '<p class="note">Chaque alarme sonne le jour et à l’heure indiqués dans le fichier (colonne Heure).</p>' : ''}
         ${I.remind === 'veille' ? `<label class="f">Heure, la veille</label>${wheelTimeHTML('impVeille', I.veilleTime)}` : ''}
         ${I.remind === 'day' ? `<label class="f">Heure, le jour même</label>${wheelTimeHTML('impDay', I.dayTime)}` : ''}
         ${I.remind === 'before' ? `<label class="f">Minutes avant le début du créneau</label><input type="number" id="impBefore" min="1" max="600" value="${I.beforeMin}">` : ''}

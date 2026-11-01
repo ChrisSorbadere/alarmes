@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -2761,7 +2761,20 @@ async function handleOpenAlarm(id) {
   openDetail(id);
 }
 
+/* Marges système : si Android a déjà réservé la place des barres (WebView plus petite que l'écran),
+   on n'ajoute pas une seconde marge en haut et en bas. */
+function fitInsets() {
+  if (!isNative) return;
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return; // clavier ouvert : on ne touche à rien
+  const padded = (screen.height - window.innerHeight) > 30;
+  document.documentElement.classList.toggle('noinset', padded);
+}
+
 async function start() {
+  fitInsets();
+  window.addEventListener('resize', fitInsets);
+  window.addEventListener('orientationchange', () => setTimeout(fitInsets, 300));
   await loadAll();
   bindMain(); bindSheet(); bindImport(); bindSettings(); bindTimers();
   if (!isNative) {

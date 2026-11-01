@@ -338,3 +338,5 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .quickswitch { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 12px; padding: 12px 14px;
   border: 1px dashed var(--muted); border-radius: 14px; background: var(--soft); text-align: left; font-size: 16px; }
 .quickswitch span { color: var(--muted); font-size: 13px; margin-left: auto; }
+
+:root.noinset { --sat: 0px; --sab: 0px; }

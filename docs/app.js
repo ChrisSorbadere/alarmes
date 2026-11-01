@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.10.0';
+const VERSION = '1.11.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -635,7 +635,6 @@ function updateSelBar() {
   const on = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   document.body.classList.toggle('selmode', on);
   $('#fab').hidden = on || !(S.tab === 'list' || S.tab === 'calendar');
-  $('#fabQuick').hidden = $('#fab').hidden;
   bar.hidden = !on;
   if (!on) return;
   const n = S.sel.size, dis = n ? '' : 'disabled';
@@ -1396,6 +1395,7 @@ function renderEditor() {
     <button class="save" data-ed="save">Enregistrer</button>
   </div>
   <div class="sheet-body">
+    ${a._isNew ? `<button class="quickswitch" data-ed="quick">⚡ <b>Alarme rapide</b><span>aujourd’hui, en deux touchers</span></button>` : ''}
     <label class="f">Titre</label>
     <input type="text" id="edTitle" value="${esc(a.title)}" placeholder="Ex. : rendre les copies de 5B">
 
@@ -1733,6 +1733,7 @@ async function editorAction(act, el) {
       try { await Native.openEvent({ id: ED.event.id, begin: ED.event.begin, end: ED.event.end }); } catch (e) { toast('Impossible d’ouvrir l’agenda'); }
       return;
     case 'preview': togglePreview(effRing(ED).sound); return;
+    case 'quick': closeSheet(); openQuick(); return;
     case 'photo': $('#edPhotoInput').click(); return;
     case 'library':
       openPhotoPicker(list => {
@@ -2642,7 +2643,6 @@ function bindSettings() {
 function bindMain() {
   $$('.tabs button').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   $('#fab').addEventListener('click', () => openEditor(null, S.tab === 'calendar' ? S.calSel : null));
-  $('#fabQuick').addEventListener('click', openQuick);
   const v = $('#view');
   // Appui long = sélection ; glisser vers la gauche = suppression
   let press = null, suppressClick = false;

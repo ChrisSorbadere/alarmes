@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.14.0';
+const VERSION = '1.15.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -1748,6 +1748,31 @@ function mapsUrl(place) {
   return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(place.label);
 }
 
+
+/* ---------- Doublons : import de fichier + alarme « jours de lycée » ---------- */
+const isSchoolAlarm = a => a.enabled !== false && a.schedule && a.schedule.type === 'weekly' && a.schedule.schoolOnly;
+const isImported = a => a.enabled !== false && !!a.source;
+/** Sonneries communes (même jour, même heure) entre deux groupes d'alarmes, sur un an. */
+function findClashes(groupA, groupB) {
+  const from = new Date(), to = addDays(from, 400);
+  const mapB = new Map();
+  for (const b of groupB) for (const d of occurrences(b, from, to)) {
+    const k = ymd(d) + '|' + fmtTime(d);
+    if (!mapB.has(k)) mapB.set(k, { b, d });
+  }
+  const hits = [];
+  for (const a of groupA) for (const d of occurrences(a, from, to)) {
+    const m = mapB.get(ymd(d) + '|' + fmtTime(d));
+    if (m) hits.push({ a, b: m.b, d });
+  }
+  return hits.sort((x, y) => x.d - y.d);
+}
+function clashMessage(hits, intro, question) {
+  const pairs = [...new Set(hits.map(h => `« ${h.a.title || 'Alarme'} » / « ${h.b.title || 'Alarme'} » à ${fmtTime(h.d)}`))].slice(0, 3);
+  const srcs = [...new Set(hits.map(h => (h.a.source || h.b.source || {}).name).filter(Boolean))];
+  return `⚠️ Alarmes en double\n\n${intro}\n${hits.length} sonnerie${hits.length > 1 ? 's' : ''} en double, la première ${relDay(hits[0].d)} à ${fmtTime(hits[0].d)}.\n\n${pairs.join('\n')}${srcs.length ? `\n\nImport concerné : ${srcs.join(', ')}` : ''}\n\n${question}`;
+}
+
 async function editorAction(act, el) {
   const sc = ED.schedule;
   if (act === 'close') { closeSheet(); return; }
@@ -1759,6 +1784,10 @@ async function editorAction(act, el) {
       if (sc.type === 'weekly' && !sc.weekdays.length && !sc.schoolOnly) { toast('Choisis au moins un jour de la semaine.'); return; }
       if (sc.type === 'monthly' && !sc.monthDays.length) { toast('Choisis au moins un jour du mois.'); return; }
       if (!ED.title) ED.title = ED.description.split('\n')[0].slice(0, 60) || 'Alarme';
+      if (isSchoolAlarm(ED)) {
+        const hits = findClashes([ED], S.alarms.filter(x => x.id !== ED.id && isImported(x)));
+        if (hits.length && !confirm(clashMessage(hits, 'Cette alarme « jours de lycée » sonne au même moment que des alarmes importées depuis un fichier.', 'Enregistrer quand même ?'))) return;
+      }
       const isNew = ED._isNew;
       delete ED._isNew; delete ED._calMonth;
       ED.updatedAt = Date.now();
@@ -2291,6 +2320,12 @@ async function applyImport() {
   const { list } = buildCandidates();
   const d = diffImport(list);
   const src = S.imp.sourceName;
+  const school = S.alarms.filter(isSchoolAlarm);
+  if (school.length) {
+    const pseudo = list.map(c => ({ title: c.title, time: c.time, source: { name: src }, schedule: { type: 'dates', dates: [c.date] } }));
+    const hits = findClashes(school, pseudo);
+    if (hits.length && !confirm(clashMessage(hits, 'Ce fichier crée des alarmes qui sonnent au même moment que tes alarmes « jours de lycée ».', 'Importer quand même ?'))) return false;
+  }
   const mk = c => {
     const a = blankAlarm(c.date);
     Object.assign(a, { title: c.title, description: c.description, time: c.time, level: c.level, place: c.place, source: { name: src, key: c.key, file: S.imp.fileName } });
@@ -2419,7 +2454,7 @@ function bindImport() {
     const I = S.imp;
     if (b.dataset.imp === 'pick') { $('#impFile').click(); return; }
     if (b.dataset.imp === 'cancel') { S.imp = null; render(); return; }
-    if (b.dataset.imp === 'apply') { b.disabled = true; await applyImport(); return; }
+    if (b.dataset.imp === 'apply') { b.disabled = true; if (await applyImport() === false) b.disabled = false; return; }
     if (b.dataset.delsrc) {
       const n = b.dataset.delsrc;
       if (!confirm(`Supprimer toutes les alarmes de « ${n} » ?`)) return;

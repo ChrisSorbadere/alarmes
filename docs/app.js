@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.13.0';
+const VERSION = '1.14.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -609,6 +609,7 @@ function renderListBody() {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  if (schoolEnding() && !S.selMode) html += `<div class="card banner" data-goschool="1">🏫 <b>Calendrier du lycée</b><div class="note">${esc(schoolEnding())} Touche ici.</div></div>`;
   if (S.update && !S.selMode) html += `<div class="card banner upd" data-goupdate="1">⬆️ <b>Nouvelle version ${esc(S.update.version)} disponible</b><div class="note">Touche ici pour mettre à jour (tes alarmes sont conservées).</div></div>`;
   if (backupDue() && !S.selMode) html += `<div class="card banner" data-gobackup="1">💾 <b>Pense à sauvegarder tes alarmes</b><div class="note">${backupStatus()} Touche ici pour le faire.</div></div>`;
   if (S.search.trim()) html += `<p class="note" style="margin:0 4px 8px">${items.length} résultat${items.length > 1 ? 's' : ''} pour « ${esc(S.search.trim())} »</p>`;
@@ -1049,6 +1050,17 @@ async function installUpdate() {
 }
 
 /* ---------- Calendrier du lycée ---------- */
+/** Message si le calendrier du lycée est fini ou bientôt fini (alarmes « jours de lycée » concernées). */
+function schoolEnding() {
+  const used = S.alarms.some(a => a.enabled && a.schedule.type === 'weekly' && a.schedule.schoolOnly);
+  if (!used) return '';
+  if (!S.school || !S.school.days.length) return 'Aucun calendrier du lycée enregistré : tes alarmes « jours de lycée » ne sonnent pas.';
+  const last = parseYmd(S.school.days[S.school.days.length - 1]);
+  const left = Math.round((last - today0()) / 86400000);
+  if (left < 0) return 'Le calendrier du lycée est terminé : enregistre celui de la nouvelle année.';
+  if (left <= 21) return `Le calendrier du lycée se termine le ${fmtShort(last)} : pense à enregistrer celui de l’année suivante.`;
+  return '';
+}
 function schoolSummary() {
   if (!S.school || !S.school.days.length) return '';
   const d = S.school.days;
@@ -1094,10 +1106,10 @@ function weeklyPanelHTML(sc) {
       <button class="chip" data-wdp="none">Aucun</button>
     </div>
     <div class="schoolbox ${sc.schoolOnly ? 'on' : ''}">
-      <button class="schoolhead" data-school="toggle">
+      <button class="schoolhead" data-school="${has ? 'toggle' : 'none'}">
         <span class="sico">🏫</span>
-        <span class="stxt"><b>Seulement les jours de lycée</b><small>${has ? esc(schoolSummary()) : 'Aucun calendrier du lycée importé'}</small></span>
-        <span class="switch"><input type="checkbox" ${sc.schoolOnly ? 'checked' : ''} tabindex="-1"><span></span></span>
+        <span class="stxt"><b>Seulement les jours de lycée</b><small>${has ? esc(schoolSummary()) : 'Aucun calendrier du lycée enregistré'}</small></span>
+        ${has ? `<span class="switch"><input type="checkbox" ${sc.schoolOnly ? 'checked' : ''} tabindex="-1"><span></span></span>` : ''}
       </button>
       ${sc.schoolOnly ? `
         ${has ? `<div class="seg" style="margin-top:10px">
@@ -1105,9 +1117,8 @@ function weeklyPanelHTML(sc) {
             <button data-school="-1" class="${sc.dayOffset === -1 ? 'on' : ''}">La veille</button>
           </div>
           <p class="note">${sc.weekdays.length ? 'Jours cochés ET jours de lycée' : 'Aucun jour coché = tous les jours de lycée'}${sc.dayOffset === -1 ? ' · sonne la veille (ex. lundi coché → dimanche)' : ''}.</p>`
-        : '<p class="note">Choisis le fichier du calendrier du lycée (Excel, Google Sheets ou CSV avec une colonne Date).</p>'}
-        <div class="btns" style="margin-top:6px"><button class="btn small" data-school="import">${has ? 'Changer de calendrier' : '📥 Importer le calendrier du lycée'}</button></div>` : ''}
-      <input type="file" id="edSchoolFile" accept=".xlsx,.xls,.ods,.csv,.ics,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden>
+        : ''}` : ''}
+      ${!has ? '<p class="note" style="margin:6px 0 0">À enregistrer une fois par an dans <b>Réglages › Calendrier du lycée</b>.</p>' : ''}
     </div>`;
 }
 
@@ -1744,7 +1755,7 @@ async function editorAction(act, el) {
   switch (act) {
     case 'save': {
       if (sc.type === 'dates' && !sc.dates.length) { toast('Choisis au moins une date dans le calendrier.'); return; }
-      if (sc.type === 'weekly' && sc.schoolOnly && !S.schoolSet.size) { toast('Importe d’abord le calendrier du lycée.'); return; }
+      if (sc.type === 'weekly' && sc.schoolOnly && !S.schoolSet.size) { toast('Enregistre d’abord le calendrier dans Réglages › Calendrier du lycée.'); return; }
       if (sc.type === 'weekly' && !sc.weekdays.length && !sc.schoolOnly) { toast('Choisis au moins un jour de la semaine.'); return; }
       if (sc.type === 'monthly' && !sc.monthDays.length) { toast('Choisis au moins un jour du mois.'); return; }
       if (!ED.title) ED.title = ED.description.split('\n')[0].slice(0, 60) || 'Alarme';
@@ -1909,10 +1920,8 @@ function bindSheet() {
     }
     if (btn.dataset.school !== undefined) {
       readEditorFields();
-      if (btn.dataset.school === 'toggle') {
-        sc.schoolOnly = !sc.schoolOnly;
-        if (sc.schoolOnly && !S.schoolSet.size) toast('Importe le calendrier du lycée pour activer cette option');
-      } else if (btn.dataset.school === 'import') { $('#edSchoolFile').click(); return; }
+      if (btn.dataset.school === 'none') { toast('Enregistre d’abord le calendrier dans Réglages › Calendrier du lycée', 3500); return; }
+      if (btn.dataset.school === 'toggle') sc.schoolOnly = !sc.schoolOnly;
       else sc.dayOffset = Number(btn.dataset.school);
       const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
     }
@@ -2624,7 +2633,7 @@ async function renderSettings(v) {
 
     <h2>Calendrier du lycée</h2>
     <div class="card">
-      <p class="note" style="margin-top:0">${S.school && S.school.days.length ? `<b>${esc(S.school.name)}</b> : ${esc(schoolSummary())}.` : 'Aucun calendrier importé.'} Sert à l’option « Seulement les jours de lycée » des alarmes répétées.</p>
+      <p class="note" style="margin-top:0">${S.school && S.school.days.length ? `<b>${esc(S.school.name)}</b> : ${esc(schoolSummary())}.${schoolEnding() ? ' <b style="color:var(--danger)">' + schoolEnding() + '</b>' : ''}` : 'Aucun calendrier enregistré.'} À faire <b>une fois par an</b> : il sert à toutes les alarmes « Seulement les jours de lycée ».</p>
       <div class="btns" style="margin-top:0">
         <button class="btn small" data-set="schooladd">📥 ${S.school ? 'Remplacer' : 'Importer'} le calendrier</button>
         ${S.school ? '<button class="btn small danger" data-set="schooldel">Retirer</button>' : ''}
@@ -2827,6 +2836,7 @@ function bindMain() {
   v.addEventListener('click', async e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
     if (e.target.closest('[data-goupdate]')) { installUpdate(); return; }
+    if (e.target.closest('[data-goschool]')) { go('settings'); setTimeout(() => { const el = $('[data-set="schooladd"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     if (e.target.closest('[data-gobackup]')) { go('settings'); setTimeout(() => { const el = $('[data-set="backup"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     const sb = e.target.closest('[data-sel]');
     if (sb && (S.tab === 'list' || S.tab === 'calendar')) {

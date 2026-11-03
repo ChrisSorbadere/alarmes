@@ -340,3 +340,12 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .quickswitch span { color: var(--muted); font-size: 13px; margin-left: auto; }
 
 :root.noinset { --sat: 0px; --sab: 0px; }
+
+/* Jours de lycée */
+.schoolbox { margin-top: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 10px 12px; }
+.schoolbox.on { border-color: #16a34a; box-shadow: 0 0 0 1px #16a34a inset; }
+.schoolhead { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; padding: 2px 0; text-align: left; }
+.schoolhead .sico { font-size: 24px; }
+.schoolhead .stxt { flex: 1; display: flex; flex-direction: column; }
+.schoolhead .stxt small { color: var(--muted); font-size: 13px; }
+.schoolhead .switch { pointer-events: none; }

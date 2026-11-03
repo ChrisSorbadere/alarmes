@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.12.0';
+const VERSION = '1.13.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -122,6 +122,8 @@ async function loadAll() {
   S.fired = await DB.get('fired', {});
   S.timers = await DB.get('timers', []);
   S.library = await DB.get('photoLib', []);
+  S.school = await DB.get('schoolCal', null);
+  S.schoolSet = new Set((S.school && S.school.days) || []);
 }
 async function saveTimers() {
   await DB.set('timers', S.timers);
@@ -161,7 +163,14 @@ function ruleMatches(sc, d) {
   if (sc.start && s < sc.start) return false;
   if (sc.end && s > sc.end) return false;
   if (sc.type === 'daily') return true;
-  if (sc.type === 'weekly') return sc.weekdays.includes(d.getDay());
+  if (sc.type === 'weekly') {
+    if (sc.schoolOnly) {
+      const sd = addDays(d, -(sc.dayOffset || 0)); // jour de lycée concerné (le lendemain si « la veille »)
+      if (!S.schoolSet || !S.schoolSet.has(ymd(sd))) return false;
+      return !sc.weekdays.length || sc.weekdays.includes(sd.getDay());
+    }
+    return sc.weekdays.includes(d.getDay());
+  }
   if (sc.type === 'monthly') {
     const dom = d.getDate();
     return sc.monthDays.includes(dom) || (sc.monthDays.includes(-1) && dom === lastDayOfMonth(d));
@@ -224,7 +233,8 @@ function scheduleSummary(a) {
   } else if (sc.type === 'daily') s = 'Chaque jour';
   else if (sc.type === 'weekly') {
     const w = WD_ORDER.filter(x => sc.weekdays.includes(x)).map(x => JOURS[x].slice(0, 3));
-    s = w.length === 7 ? 'Chaque jour' : w.length ? 'Chaque ' + w.join(', ') : 'Aucun jour';
+    if (sc.schoolOnly) s = (sc.dayOffset ? 'Veille des ' : '') + 'jours de lycée' + (w.length && w.length < 7 ? ' (' + w.join(', ') + ')' : '');
+    else s = w.length === 7 ? 'Chaque jour' : w.length ? 'Chaque ' + w.join(', ') : 'Aucun jour';
   } else if (sc.type === 'monthly') {
     const m = [...sc.monthDays].sort((x, y) => (x === -1) - (y === -1) || x - y).map(x => x === -1 ? 'dernier jour' : x);
     s = m.length ? 'Le ' + m.join(', ') + ' du mois' : 'Aucun jour';
@@ -1038,6 +1048,69 @@ async function installUpdate() {
   }
 }
 
+/* ---------- Calendrier du lycée ---------- */
+function schoolSummary() {
+  if (!S.school || !S.school.days.length) return '';
+  const d = S.school.days;
+  const a = parseYmd(d[0]), b = parseYmd(d[d.length - 1]);
+  const m = x => { const n = MOIS[x.getMonth()]; return n.length <= 4 ? n : n.slice(0, n.startsWith('juil') ? 5 : 4) + '.'; };
+  return `${d.length} jours · ${m(a)} ${a.getFullYear()} → ${m(b)} ${b.getFullYear()}`;
+}
+async function setSchoolDays(days, name) {
+  S.school = { days: [...new Set(days)].sort(), name: name || 'Calendrier', importedAt: Date.now() };
+  S.schoolSet = new Set(S.school.days);
+  await DB.set('schoolCal', S.school);
+  await syncNative();
+}
+/** Lit un fichier (Excel, CSV, ICS) et garde ses dates comme jours de lycée. */
+async function importSchoolFile(file) {
+  try {
+    const parsed = await readImportFile(file);
+    const rows = parsed.rowsBySheet[parsed.sheet] || [];
+    const hr = guessHeaderRow(rows);
+    const map = autoMap(rows[hr] || []);
+    const col = map.date !== undefined ? map.date : 0;
+    const sy = defaultSchoolYear();
+    const days = [];
+    for (const r of rows.slice(hr + 1)) {
+      const dt = parseDateCell(r[col], mo => (mo >= 8 ? sy : sy + 1));
+      if (dt) days.push(`${dt.y}-${pad(dt.m)}-${pad(dt.d)}`);
+    }
+    if (!days.length) { toast('Aucune date trouvée dans ce fichier', 4000); return false; }
+    await setSchoolDays(days, parsed.name);
+    toast(`Calendrier du lycée : ${S.school.days.length} jours`, 3500);
+    return true;
+  } catch (e) { toast('Fichier illisible : ' + (e.message || e), 4000); return false; }
+}
+function weeklyPanelHTML(sc) {
+  const has = S.schoolSet && S.schoolSet.size;
+  const wds = WD_ORDER.map((w, i) => `<button data-wd="${w}" class="${sc.weekdays.includes(w) ? 'on' : ''}">${JOURS_COURTS[i]}</button>`).join('');
+  return `
+    <label class="f">Jours de la semaine</label>
+    <div class="wd">${wds}</div>
+    <div class="chips" style="margin-top:8px">
+      <button class="chip" data-wdp="week">Lun → Ven</button>
+      <button class="chip" data-wdp="all">Tous</button>
+      <button class="chip" data-wdp="none">Aucun</button>
+    </div>
+    <div class="schoolbox ${sc.schoolOnly ? 'on' : ''}">
+      <button class="schoolhead" data-school="toggle">
+        <span class="sico">🏫</span>
+        <span class="stxt"><b>Seulement les jours de lycée</b><small>${has ? esc(schoolSummary()) : 'Aucun calendrier du lycée importé'}</small></span>
+        <span class="switch"><input type="checkbox" ${sc.schoolOnly ? 'checked' : ''} tabindex="-1"><span></span></span>
+      </button>
+      ${sc.schoolOnly ? `
+        ${has ? `<div class="seg" style="margin-top:10px">
+            <button data-school="0" class="${!sc.dayOffset ? 'on' : ''}">Le jour même</button>
+            <button data-school="-1" class="${sc.dayOffset === -1 ? 'on' : ''}">La veille</button>
+          </div>
+          <p class="note">${sc.weekdays.length ? 'Jours cochés ET jours de lycée' : 'Aucun jour coché = tous les jours de lycée'}${sc.dayOffset === -1 ? ' · sonne la veille (ex. lundi coché → dimanche)' : ''}.</p>`
+        : '<p class="note">Choisis le fichier du calendrier du lycée (Excel, Google Sheets ou CSV avec une colonne Date).</p>'}
+        <div class="btns" style="margin-top:6px"><button class="btn small" data-school="import">${has ? 'Changer de calendrier' : '📥 Importer le calendrier du lycée'}</button></div>` : ''}
+      <input type="file" id="edSchoolFile" accept=".xlsx,.xls,.ods,.csv,.ics,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden>
+    </div>`;
+}
+
 /* ---------- Mes photos (bibliothèque) ---------- */
 function inLibrary(data) { return (S.library || []).some(x => x.data === data); }
 
@@ -1422,11 +1495,11 @@ function renderEditor() {
     <label class="f">Quand</label>
     <div class="seg" id="edType">
       <button data-type="dates" class="${sc.type === 'dates' ? 'on' : ''}">Dates choisies</button>
-      <button data-type="weekly" class="${sc.type === 'weekly' ? 'on' : ''}">Semaine</button>
+      <button data-type="weekly" class="${sc.type === 'weekly' ? 'on' : ''}">Semaine / lycée</button>
       <button data-type="monthly" class="${sc.type === 'monthly' ? 'on' : ''}">Mois</button>
       <button data-type="daily" class="${sc.type === 'daily' ? 'on' : ''}">Chaque jour</button>
     </div>
-    ${sc.type === 'weekly' ? `<label class="f">Jours de la semaine</label><div class="wd">${WD_ORDER.map((w, i) => `<button data-wd="${w}" class="${sc.weekdays.includes(w) ? 'on' : ''}">${JOURS_COURTS[i]}</button>`).join('')}</div>` : ''}
+    ${sc.type === 'weekly' ? weeklyPanelHTML(sc) : ''}
     ${sc.type === 'monthly' ? `<label class="f">Jours du mois</label><div class="md">${Array.from({ length: 31 }, (_, i) => i + 1).map(n => `<button data-md="${n}" class="${sc.monthDays.includes(n) ? 'on' : ''}">${n}</button>`).join('')}<button data-md="-1" class="last ${sc.monthDays.includes(-1) ? 'on' : ''}">Dernier jour</button></div>` : ''}
     ${sc.type !== 'dates' ? `<div class="row"><div><label class="f">À partir du</label><input type="date" id="edStart" value="${esc(sc.start)}"></div><div><label class="f">Jusqu'au (facultatif)</label><input type="date" id="edEnd" value="${esc(sc.end)}"></div></div>` : ''}
 
@@ -1671,7 +1744,8 @@ async function editorAction(act, el) {
   switch (act) {
     case 'save': {
       if (sc.type === 'dates' && !sc.dates.length) { toast('Choisis au moins une date dans le calendrier.'); return; }
-      if (sc.type === 'weekly' && !sc.weekdays.length) { toast('Choisis au moins un jour de la semaine.'); return; }
+      if (sc.type === 'weekly' && sc.schoolOnly && !S.schoolSet.size) { toast('Importe d’abord le calendrier du lycée.'); return; }
+      if (sc.type === 'weekly' && !sc.weekdays.length && !sc.schoolOnly) { toast('Choisis au moins un jour de la semaine.'); return; }
       if (sc.type === 'monthly' && !sc.monthDays.length) { toast('Choisis au moins un jour du mois.'); return; }
       if (!ED.title) ED.title = ED.description.split('\n')[0].slice(0, 60) || 'Alarme';
       const isNew = ED._isNew;
@@ -1827,6 +1901,21 @@ function bindSheet() {
       }
       return;
     }
+    if (btn.dataset.wdp) {
+      readEditorFields();
+      const preset = { week: [1, 2, 3, 4, 5], all: [0, 1, 2, 3, 4, 5, 6], none: [] }[btn.dataset.wdp];
+      sc.weekdays = [...preset];
+      const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
+    }
+    if (btn.dataset.school !== undefined) {
+      readEditorFields();
+      if (btn.dataset.school === 'toggle') {
+        sc.schoolOnly = !sc.schoolOnly;
+        if (sc.schoolOnly && !S.schoolSet.size) toast('Importe le calendrier du lycée pour activer cette option');
+      } else if (btn.dataset.school === 'import') { $('#edSchoolFile').click(); return; }
+      else sc.dayOffset = Number(btn.dataset.school);
+      const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
+    }
     if (btn.dataset.wd !== undefined) {
       readEditorFields();
       const w = Number(btn.dataset.wd);
@@ -1874,6 +1963,13 @@ function bindSheet() {
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
   s.addEventListener('change', async e => {
+    if (ED && e.target.id === 'edSchoolFile' && e.target.files[0]) {
+      readEditorFields();
+      await importSchoolFile(e.target.files[0]);
+      if (S.schoolSet.size) ED.schedule.schoolOnly = true;
+      const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y;
+      return;
+    }
     if (BE && e.target.id === 'bePhotoInput') {
       readBulkFields();
       for (const f of e.target.files) { try { BE.addPhotos.push(await compressImage(f)); } catch (err) { toast('Photo illisible'); } }
@@ -2404,7 +2500,7 @@ function backupDue() {
 async function doBackup() {
   const settings = Object.assign({}, S.settings);
   delete settings.lastBackup; delete settings.lastBackupName; delete settings.lastBackupUri;
-  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings, library: S.library || [] };
+  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings, library: S.library || [], school: S.school || null };
   const content = JSON.stringify(data);
   const name = `alarmes-sauvegarde-${ymd(new Date())}.json`;
   let savedName = name, savedUri = '';
@@ -2446,6 +2542,9 @@ async function doRestore(file, mode) {
   try { data = JSON.parse(await file.text()); } catch (e) { toast('Fichier illisible'); return; }
   if (!data || data.app !== 'alarmes' || !Array.isArray(data.alarms)) { toast('Ce fichier n’est pas une sauvegarde d’Alarmes'); return; }
   const incoming = data.alarms.filter(a => a && a.id && a.schedule);
+  if (data.school && Array.isArray(data.school.days) && (!S.school || mode === 'replace')) {
+    S.school = data.school; S.schoolSet = new Set(S.school.days); await DB.set('schoolCal', S.school);
+  }
   if (Array.isArray(data.library)) {
     const have = new Set((S.library || []).map(x => x.id));
     let n = 0;
@@ -2522,6 +2621,17 @@ async function renderSettings(v) {
 
     <h2>Modifier ou supprimer en groupe</h2>
     <div class="card note">Onglet Alarmes : cherche un mot, touche « Sélectionner », puis « Tout sélectionner ». Tu peux ensuite modifier, activer, désactiver ou supprimer toutes ces alarmes d’un coup.</div>
+
+    <h2>Calendrier du lycée</h2>
+    <div class="card">
+      <p class="note" style="margin-top:0">${S.school && S.school.days.length ? `<b>${esc(S.school.name)}</b> : ${esc(schoolSummary())}.` : 'Aucun calendrier importé.'} Sert à l’option « Seulement les jours de lycée » des alarmes répétées.</p>
+      <div class="btns" style="margin-top:0">
+        <button class="btn small" data-set="schooladd">📥 ${S.school ? 'Remplacer' : 'Importer'} le calendrier</button>
+        ${S.school ? '<button class="btn small danger" data-set="schooldel">Retirer</button>' : ''}
+      </div>
+      <input type="file" id="schoolFile" accept=".xlsx,.xls,.ods,.csv,.ics,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden>
+      <p class="note">Toute date présente dans le fichier compte comme jour de lycée (ex. l’onglet « Séances » du calendrier des classes).</p>
+    </div>
 
     <h2>Mes photos</h2>
     <div class="card">
@@ -2605,6 +2715,11 @@ function bindSettings() {
     if (b.dataset.set === 'sharebackup') { await shareBackup(); return; }
     if (b.dataset.set === 'checkupdate') { toast('Recherche d’une mise à jour…'); const u = await checkUpdate(true); keepScroll(render); toast(u ? `Version ${u.version} disponible` : 'Tu as la dernière version'); return; }
     if (b.dataset.set === 'doupdate') { installUpdate(); return; }
+    if (b.dataset.set === 'schooladd') { const i = $('#schoolFile'); i.value = ''; i.click(); return; }
+    if (b.dataset.set === 'schooldel') {
+      if (!confirm('Retirer le calendrier du lycée ? Les alarmes « jours de lycée » ne sonneront plus.')) return;
+      S.school = null; S.schoolSet = new Set(); await DB.set('schoolCal', null); await syncNative(); keepScroll(render); return;
+    }
     if (b.dataset.set === 'libadd') { const i = $('#libFile'); i.value = ''; i.click(); return; }
     if (b.dataset.libdel) {
       if (!confirm('Retirer cette photo de « Mes photos » ? (Les alarmes qui l’utilisent la gardent.)')) return;
@@ -2620,6 +2735,7 @@ function bindSettings() {
     if (S.tab !== 'settings') return;
     if (e.target.id === 'setSnooze') { S.settings.snoozeMin = Number(e.target.value); await saveSettings(); toast('Snooze : ' + e.target.value + ' min'); }
     if (e.target.id === 'setDefTime') { S.settings.defaultTime = e.target.value || '07:30'; await saveSettings(); }
+    if (e.target.id === 'schoolFile' && e.target.files[0]) { await importSchoolFile(e.target.files[0]); keepScroll(render); return; }
     if (e.target.id === 'libFile') {
       let n = 0;
       for (const f of e.target.files) { try { S.library.push({ id: uid(), data: await compressImage(f), addedAt: Date.now() }); n++; } catch (err) { toast('Photo illisible'); } }

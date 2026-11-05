@@ -349,3 +349,6 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .schoolhead .stxt { flex: 1; display: flex; flex-direction: column; }
 .schoolhead .stxt small { color: var(--muted); font-size: 13px; }
 .schoolhead .switch { pointer-events: none; }
+.calrow { padding: 10px 0; border-top: 1px solid var(--line); }
+.calrow:first-of-type { border-top: 0; }
+.calpick .chip.on { background: #16a34a; border-color: #16a34a; color: #fff; }

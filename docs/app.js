@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.16.0';
+const VERSION = '1.17.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -122,6 +122,7 @@ async function loadAll() {
   S.fired = await DB.get('fired', {});
   S.timers = await DB.get('timers', []);
   S.library = await DB.get('photoLib', []);
+  S.skip = await DB.get('importSkip', {});
   S.cals = await DB.get('calendars', null);
   if (!Array.isArray(S.cals)) {
     const old = await DB.get('schoolCal', null);
@@ -654,7 +655,14 @@ function updateSelBar() {
   bar.hidden = !on;
   if (!on) return;
   const n = S.sel.size, dis = n ? '' : 'disabled';
+  const selA = S.alarms.filter(a => S.sel.has(a.id));
+  const moreSim = selA.length && selA.length <= 400 ? new Set(selA.flatMap(a => similarOf(a).map(b => b.id)).filter(id => !S.sel.has(id))).size : 0;
+  const nDates = selA.filter(a => a.schedule.type === 'dates').reduce((t, a) => t + a.schedule.dates.length, 0);
   bar.innerHTML = `<div class="selcount"><b>${n}</b> sélectionnée${n > 1 ? 's' : ''}</div>
+    ${moreSim || nDates > 1 ? `<div class="selbtns two">
+      ${moreSim ? `<button class="btn small" data-sb="similar">≈ Semblables (+${moreSim})</button>` : '<span></span>'}
+      ${nDates > 1 ? `<button class="btn small" data-sb="dates">📅 Choisir les dates (${nDates})</button>` : '<span></span>'}
+    </div>` : ''}
     <div class="selbtns">
       <button class="btn small primary" data-sb="edit" ${dis}>Modifier</button>
       <button class="btn small" data-sb="on" ${dis}>Activer</button>
@@ -679,11 +687,14 @@ async function deleteWithUndo(id) {
   if (idx < 0) return;
   const [a] = S.alarms.splice(idx, 1);
   S.sel.delete(id);
+  const skipBefore = clone(S.skip);
+  await rememberDeleted([a]);
   await saveAlarms();
   refreshView();
   const several = a.schedule.type !== 'dates' || a.schedule.dates.length > 1;
   toastAction(`« ${(a.title || 'Alarme').slice(0, 40)} » supprimée${several ? ' (toutes ses dates)' : ''}`, 'Annuler', async () => {
     S.alarms.splice(Math.min(idx, S.alarms.length), 0, a);
+    S.skip = skipBefore; await DB.set('importSkip', S.skip);
     await saveAlarms();
     refreshView();
     toast('Alarme restaurée');
@@ -695,6 +706,14 @@ async function selAction(act) {
   const n = ids.size;
   if (!n) return;
   if (act === 'edit') { openBulkEditor(); return; }
+  if (act === 'similar') {
+    const before = S.sel.size;
+    for (const a of S.alarms) if (ids.has(a.id)) for (const b of similarOf(a)) S.sel.add(b.id);
+    refreshView();
+    toast(S.sel.size > before ? `${S.sel.size - before} alarme(s) semblable(s) ajoutée(s) · ${S.sel.size} au total` : 'Aucune autre alarme semblable');
+    return;
+  }
+  if (act === 'dates') { openDatesPicker([...ids]); return; }
   if (act === 'on' || act === 'off') {
     S.alarms.forEach(a => { if (ids.has(a.id)) a.enabled = act === 'on'; });
     await saveAlarms(); refreshView();
@@ -703,10 +722,132 @@ async function selAction(act) {
   }
   if (act === 'del') {
     if (!confirm(`Supprimer définitivement ${n} alarme(s) ?`)) return;
+    await rememberDeleted(S.alarms.filter(a => ids.has(a.id)));
     S.alarms = S.alarms.filter(a => !ids.has(a.id));
     S.sel.clear(); S.selMode = false;
     await saveAlarms(); render();
     toast(`${n} alarme(s) supprimée(s)`);
+  }
+}
+
+/* ---------- Alarmes semblables et choix des dates ---------- */
+const simKey = a => norm((a.title || '').trim()) + '|' + a.time;
+function similarOf(a) { const k = simKey(a); return S.alarms.filter(b => simKey(b) === k); }
+/** Garde en mémoire les dates importées supprimées à la main, pour ne pas les recréer au prochain import. */
+async function rememberDeleted(list) {
+  let n = 0;
+  for (const a of list) if (a.source && a.source.key && a.source.name) {
+    const arr = S.skip[a.source.name] || (S.skip[a.source.name] = []);
+    if (!arr.includes(a.source.key)) { arr.push(a.source.key); n++; }
+  }
+  if (n) await DB.set('importSkip', S.skip);
+}
+
+let DP = null; // choix des dates en cours
+
+function openDatesPicker(ids) {
+  ED = null; BE = null;
+  const map = {};
+  let recurring = 0;
+  for (const a of S.alarms) {
+    if (!ids.includes(a.id)) continue;
+    if (a.schedule.type !== 'dates') { recurring++; continue; }
+    for (const d of a.schedule.dates) (map[d] = map[d] || []).push(a.id);
+  }
+  const days = Object.keys(map).sort();
+  if (!days.length) { toast('Ces alarmes n’ont pas de dates fixes : ouvre l’alarme pour retirer des jours dans son calendrier.', 4500); return; }
+  const t = ymd(today0());
+  const first = days.find(d => d >= t) || days[0];
+  DP = { ids, map, days, del: new Set(), recurring, month: new Date(parseYmd(first).getFullYear(), parseYmd(first).getMonth(), 1) };
+  renderDates();
+  showSheet();
+}
+
+function renderDates() {
+  const p = DP, t = ymd(today0());
+  const nd = p.del.size, nAl = new Set([...p.del].flatMap(d => p.map[d])).size;
+  const wds = [...new Set(p.days.map(d => parseYmd(d).getDay()))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+  const past = p.days.filter(d => d < t).length;
+  const cal = calendarHTML(p.month, (d, s) => {
+    if (!p.map[s]) return {};
+    const n = p.map[s].length;
+    return p.del.has(s) ? { cls: 'except dpd', inner: n > 1 ? `<small class="dpn">×${n}</small>` : '' }
+      : { cls: 'hit', style: '--c:#16a34a', inner: n > 1 ? `<small class="dpn">×${n}</small>` : '' };
+  });
+  const s = $('#sheet');
+  s.innerHTML = `
+  <div class="sheet-head">
+    <button data-dp="close">✕</button>
+    <h3>Choisir les dates</h3>
+    <span></span>
+  </div>
+  <div class="sheet-body">
+    <p class="note" style="margin-top:0"><b>${p.days.length}</b> dates. Touche les jours à <b>supprimer</b> : ils passent en barré. Fais défiler les mois avec ‹ ›.${p.recurring ? ` (${p.recurring} alarme(s) récurrente(s) non concernée(s) : retire leurs jours depuis l’alarme elle-même.)` : ''}</p>
+    <div class="chips">
+      <button class="chip" data-dpq="all">Tout</button>
+      <button class="chip" data-dpq="none">Aucune</button>
+      ${past ? `<button class="chip" data-dpq="past">Passées (${past})</button>` : ''}
+      ${wds.length > 1 ? wds.map(w => `<button class="chip" data-dpq="wd${w}">${capital(JOURS[w])}s</button>`).join('') : ''}
+    </div>
+    ${cal}
+    <p class="note">${nd ? `<b>${nd}</b> date(s) à supprimer${nAl !== nd ? ` (${nAl} alarmes)` : ''}.` : 'Aucune date choisie.'} Les dates importées supprimées ne seront pas recréées au prochain import du fichier.</p>
+    <div class="btns">
+      <button class="btn danger" data-dp="apply" ${nd ? '' : 'disabled'}>🗑 Supprimer ${nd || ''} date${nd > 1 ? 's' : ''}</button>
+    </div>
+  </div>`;
+}
+
+async function datesClick(e) {
+  const p = DP, b = e.target.closest('button');
+  if (!b) return;
+  const t = ymd(today0());
+  const keep = () => { const y = $('#sheet').scrollTop; renderDates(); $('#sheet').scrollTop = y; };
+  if (b.dataset.dp === 'close') { closeSheet(); return; }
+  if (b.dataset.cal) { p.month = new Date(p.month.getFullYear(), p.month.getMonth() + Number(b.dataset.cal), 1); keep(); return; }
+  if (b.dataset.day) {
+    const d = b.dataset.day;
+    if (!p.map[d]) return;
+    p.del.has(d) ? p.del.delete(d) : p.del.add(d);
+    keep(); return;
+  }
+  if (b.dataset.dpq) {
+    const q = b.dataset.dpq;
+    if (q === 'all') p.days.forEach(d => p.del.add(d));
+    else if (q === 'none') p.del.clear();
+    else if (q === 'past') p.days.filter(d => d < t).forEach(d => p.del.add(d));
+    else if (q.startsWith('wd')) {
+      const w = Number(q.slice(2)), list = p.days.filter(d => parseYmd(d).getDay() === w);
+      const allOn = list.every(d => p.del.has(d));
+      list.forEach(d => allOn ? p.del.delete(d) : p.del.add(d));
+    }
+    keep(); return;
+  }
+  if (b.dataset.dp === 'apply') {
+    const dels = new Set(p.del);
+    if (!dels.size) return;
+    if (!confirm(`Supprimer ${dels.size} date(s) ?`)) return;
+    const snapAlarms = clone(S.alarms), snapSkip = clone(S.skip);
+    const removed = [];
+    for (const a of S.alarms) {
+      if (!p.ids.includes(a.id) || a.schedule.type !== 'dates') continue;
+      const left = a.schedule.dates.filter(d => !dels.has(d));
+      if (left.length === a.schedule.dates.length) continue;
+      if (!left.length) removed.push(a);
+      else { a.schedule.dates = left; a.updatedAt = Date.now(); }
+    }
+    await rememberDeleted(removed);
+    const rm = new Set(removed.map(a => a.id));
+    S.alarms = S.alarms.filter(a => !rm.has(a.id));
+    for (const id of rm) S.sel.delete(id);
+    if (!S.sel.size) S.selMode = false;
+    closeSheet();
+    await saveAlarms();
+    refreshView();
+    toastAction(`${dels.size} date(s) supprimée(s)`, 'Annuler', async () => {
+      S.alarms = snapAlarms; S.skip = snapSkip;
+      await DB.set('importSkip', S.skip);
+      await saveAlarms(); refreshView(); toast('Dates restaurées');
+    }, 8000);
   }
 }
 
@@ -1476,7 +1617,7 @@ function showSheet() {
 function closeSheet(fromPop) {
   const s = $('#sheet');
   const wasOpen = !s.hidden;
-  s.hidden = true; s.innerHTML = ''; ED = null; BE = null;
+  s.hidden = true; s.innerHTML = ''; ED = null; BE = null; DP = null;
   document.body.classList.remove('lock');
   if (wasOpen && !fromPop && history.state && history.state.sheet) history.back();
 }
@@ -1932,12 +2073,20 @@ function bindSheet() {
   const s = $('#sheet');
   s.addEventListener('click', async e => {
     if (BE) return bulkClick(e);
+    if (DP) return datesClick(e);
     if (!ED) {
       const d = e.target.closest('[data-dt]');
       if (d) {
         const act = d.dataset.dt;
         if (act === 'close') closeSheet();
         if (act === 'edit') openEditor(d.dataset.id);
+        if (act === 'similar') {
+          const a = S.alarms.find(x => x.id === d.dataset.id);
+          closeSheet();
+          S.selMode = true; S.sel.clear(); for (const b of similarOf(a)) S.sel.add(b.id);
+          if (S.tab !== 'list' && S.tab !== 'calendar') go('list'); else refreshView();
+          toast(`${S.sel.size} alarmes sélectionnées`);
+        }
         if (act === 'openevent') {
           const a = S.alarms.find(x => x.id === d.dataset.id);
           if (a && a.event) Native.openEvent({ id: a.event.id, begin: a.event.begin, end: a.event.end }).catch(() => toast('Impossible d’ouvrir l’agenda'));
@@ -2100,6 +2249,7 @@ function openDetail(id) {
     ${a.event ? `<label class="f">Événement de l’agenda</label>
       <div class="attach"><span>📅</span><div class="t"><b>${esc(a.event.title || 'Événement')}</b><small>${esc(eventLabel(a.event))}${a.event.missing ? ' · introuvable' : ''}</small></div>
       ${isNative ? `<button class="btn small" data-dt="openevent" data-id="${a.id}">Ouvrir</button>` : ''}</div>` : ''}
+    ${similarOf(a).length > 1 ? `<div class="btns"><button class="btn" data-dt="similar" data-id="${a.id}">≈ Sélectionner les ${similarOf(a).length} semblables</button></div><p class="note" style="margin-top:4px">Même titre et même heure : pour les modifier ou supprimer toutes, ou en choisir certaines dans un calendrier.</p>` : ''}
     <label class="f">Prochaines sonneries</label>
     ${nx.length ? `<div class="card occ">${nx.map(d => `<div>${capital(relDay(d))} ${fmtTime(d)}</div>`).join('')}</div>` : `<p class="note">${a.enabled ? 'Aucune sonnerie à venir.' : 'Alarme désactivée.'}</p>`}
   </div>`;
@@ -2337,7 +2487,10 @@ function buildCandidates() {
     while (seen[k]) k = c.key + '#' + n++;
     c.key = k; seen[k] = 1;
   }
-  return { list: out, skipped };
+  const ex = new Set((S.skip || {})[S.imp.sourceName] || []);
+  const kept = out.filter(c => !ex.has(c.key));
+  skipped.excluded = out.length - kept.length;
+  return { list: kept, skipped };
 }
 
 function diffImport(cands) {
@@ -2409,7 +2562,7 @@ function renderImport(v) {
         <div class="btns"><button class="btn primary" data-imp="pick">Choisir un fichier</button></div>
         <input type="file" id="impFile" accept=".xlsx,.xls,.ods,.csv,.ics,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,text/calendar" hidden>
       </div>
-      ${srcList.length ? `<h2>Imports existants</h2>${srcList.map(([n, c]) => `<div class="card row"><div><b>${esc(n)}</b><div class="note">${c} alarme${c > 1 ? 's' : ''}</div></div><button class="btn small danger" style="flex:none" data-delsrc="${esc(n)}">Tout supprimer</button></div>`).join('')}` : ''}`;
+      ${srcList.length ? `<h2>Imports existants</h2>${srcList.map(([n, c]) => { const ex = ((S.skip || {})[n] || []).length; return `<div class="card"><div class="row"><div><b>${esc(n)}</b><div class="note">${c} alarme${c > 1 ? 's' : ''}${ex ? ` · ${ex} date${ex > 1 ? 's' : ''} supprimée${ex > 1 ? 's' : ''} à la main (non recréée${ex > 1 ? 's' : ''} à l’import)` : ''}</div></div><button class="btn small danger" style="flex:none" data-delsrc="${esc(n)}">Tout supprimer</button></div>${ex ? `<div class="btns" style="margin:6px 0 0"><button class="btn small" data-unskip="${esc(n)}">↺ Les recréer au prochain import</button></div>` : ''}</div>`; }).join('')}` : ''}`;
     return;
   }
 
@@ -2472,7 +2625,7 @@ function renderImport(v) {
       <label class="f">Nom de l'import (sert à reconnaître le fichier au prochain import)</label>
       <input type="text" id="impName" value="${esc(I.sourceName)}">
       <div class="summary"><b>${list.length}</b> alarmes : ${diff.add.length} nouvelles, ${diff.upd.length} modifiées, ${diff.same.length} inchangées.
-        ${skipped.past ? `<br>${skipped.past} lignes ignorées (dates passées).` : ''}${skipped.nodate ? `<br>${skipped.nodate} lignes sans date lisible.` : ''}</div>
+        ${skipped.past ? `<br>${skipped.past} lignes ignorées (dates passées).` : ''}${skipped.nodate ? `<br>${skipped.nodate} lignes sans date lisible.` : ''}${skipped.excluded ? `<br>${skipped.excluded} date(s) que tu as supprimée(s) ne seront pas recréées.` : ''}</div>
       ${diff.del.length ? `<label class="custom-color"><input type="checkbox" id="impDel" ${I.removeMissing ? 'checked' : ''} style="width:20px;height:20px"> Supprimer ${diff.del.length} alarme(s) de cet import absente(s) du fichier ou des filtres</label>` : ''}
       <div class="preview" style="margin-top:8px">
         ${list.slice(0, 150).map(c => `<div style="--c:${LEVELS.find(l => l.id === c.level).color}"><span class="dot"></span><span style="flex:1"><b>${fmtShort(parseYmd(c.date))} ${c.time}</b> — ${esc(c.title)}</span>${tag(c)}</div>`).join('')}
@@ -2496,10 +2649,14 @@ function bindImport() {
     if (b.dataset.imp === 'pick') { $('#impFile').click(); return; }
     if (b.dataset.imp === 'cancel') { S.imp = null; render(); return; }
     if (b.dataset.imp === 'apply') { b.disabled = true; if (await applyImport() === false) b.disabled = false; return; }
+    if (b.dataset.unskip) {
+      delete S.skip[b.dataset.unskip]; await DB.set('importSkip', S.skip); render(); toast('Ces dates seront recréées au prochain import'); return;
+    }
     if (b.dataset.delsrc) {
       const n = b.dataset.delsrc;
       if (!confirm(`Supprimer toutes les alarmes de « ${n} » ?`)) return;
       S.alarms = S.alarms.filter(a => !(a.source && a.source.name === n));
+      delete S.skip[n]; await DB.set('importSkip', S.skip);
       await saveAlarms(); render(); toast('Alarmes supprimées'); return;
     }
     if (!I) return;
@@ -2585,7 +2742,7 @@ function backupDue() {
 async function doBackup() {
   const settings = Object.assign({}, S.settings);
   delete settings.lastBackup; delete settings.lastBackupName; delete settings.lastBackupUri;
-  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings, library: S.library || [], calendars: S.cals || [] };
+  const data = { app: 'alarmes', version: VERSION, exportedAt: new Date().toISOString(), alarms: S.alarms, settings, library: S.library || [], calendars: S.cals || [], importSkip: S.skip || {} };
   const content = JSON.stringify(data);
   const name = `alarmes-sauvegarde-${ymd(new Date())}.json`;
   let savedName = name, savedUri = '';
@@ -2633,6 +2790,10 @@ async function doRestore(file, mode) {
     if (mode === 'replace') S.cals = inCalsData;
     else for (const c of inCalsData) if (c && c.id && Array.isArray(c.days) && !calById(c.id)) S.cals.push(c);
     await saveCals();
+  }
+  if (data.importSkip && typeof data.importSkip === 'object') {
+    for (const [k, v] of Object.entries(data.importSkip)) if (Array.isArray(v)) S.skip[k] = [...new Set([...(mode === 'replace' ? [] : S.skip[k] || []), ...v])];
+    await DB.set('importSkip', S.skip);
   }
   if (Array.isArray(data.library)) {
     const have = new Set((S.library || []).map(x => x.id));

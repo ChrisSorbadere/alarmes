@@ -352,3 +352,6 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .calrow { padding: 10px 0; border-top: 1px solid var(--line); }
 .calrow:first-of-type { border-top: 0; }
 .calpick .chip.on { background: #16a34a; border-color: #16a34a; color: #fff; }
+.selbtns.two { grid-template-columns: 1fr 1fr; margin-bottom: 6px; }
+.cal-day .dpn { position: absolute; top: 1px; right: 3px; font-size: 9px; font-weight: 600; opacity: .85; }
+.cal-day.dpd { color: var(--danger, #dc2626); }

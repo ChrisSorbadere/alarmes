@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.17.0';
+const VERSION = '1.17.1';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -1290,7 +1290,7 @@ function weeklyPanelHTML(sc) {
           <button data-school="0" class="${!sc.dayOffset ? 'on' : ''}">Le jour même</button>
           <button data-school="-1" class="${sc.dayOffset === -1 ? 'on' : ''}">La veille</button>
         </div>
-        <p class="note">${sc.weekdays.length ? 'Jours cochés ET jours du calendrier' : 'Aucun jour coché = tous les jours du calendrier'}${sc.dayOffset === -1 ? ' · sonne la veille (ex. lundi coché → dimanche)' : ''}.</p>` : ''}
+        <p class="note">${sc.weekdays.length ? `Ne sonne que les <b>${WD_ORDER.filter(x => sc.weekdays.includes(x)).map(x => JOURS[x]).join(', ')}</b> du calendrier. Touche « Aucun » pour sonner <b>tous</b> les jours du calendrier` : '<b>Tous les jours du calendrier.</b> Coche des jours pour n’en garder que certains'}${sc.dayOffset === -1 ? ' · sonne la veille (ex. lundi coché → dimanche)' : ''}.</p>` : ''}
       ${!has ? '<p class="note" style="margin:6px 0 0">À enregistrer une fois par an dans <b>Réglages › Calendriers</b>.</p>' : ''}
     </div>`;
 }
@@ -2132,7 +2132,12 @@ function bindSheet() {
     if (btn.dataset.school !== undefined) {
       readEditorFields();
       if (btn.dataset.school === 'none') { toast('Enregistre d’abord un calendrier dans Réglages › Calendriers', 3500); return; }
-      if (btn.dataset.school === 'toggle') sc.schoolOnly = !sc.schoolOnly;
+      if (btn.dataset.school === 'toggle') {
+        sc.schoolOnly = !sc.schoolOnly;
+        // activé : par défaut, tous les jours du calendrier (le jour coché d'office ne doit pas filtrer)
+        if (sc.schoolOnly) sc.weekdays = [];
+        else if (!sc.weekdays.length) sc.weekdays = [1, 2, 3, 4, 5];
+      }
       else sc.dayOffset = Number(btn.dataset.school);
       const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
     }

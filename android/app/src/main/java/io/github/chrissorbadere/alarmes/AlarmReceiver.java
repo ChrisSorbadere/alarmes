@@ -37,6 +37,7 @@ public class AlarmReceiver extends BroadcastReceiver {
             return;
         }
         if (AlarmStore.ACTION_SNOOZE.equals(action)) {
+            AlarmStore.log(c, "Reportée (depuis la notification)");
             nm.cancel(nid);
             snooze(c, nid, intent.getStringExtra("json"), 0);
             return;
@@ -44,6 +45,10 @@ public class AlarmReceiver extends BroadcastReceiver {
         if (AlarmStore.ACTION_FIRE.equals(action)) {
             String json = intent.getStringExtra("json");
             JSONObject a = AlarmService.parse(json);
+            AlarmStore.markFired(c, nid);
+            long at = a.optLong("at", 0);
+            long late = at > 0 ? (System.currentTimeMillis() - at) / 1000 : 0;
+            AlarmStore.log(c, "Reçue : « " + a.optString("title", "Alarme") + " »" + (at > 0 ? " prévue " + AlarmStore.hm(at) + (late > 60 ? " (retard " + late / 60 + " min)" : "") : ""));
             boolean ring = !"notif".equals(a.optString("mode", "alarm"));
             if (!ring) {
                 show(c, nid, a);
@@ -57,6 +62,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                 ContextCompat.startForegroundService(c, s);
             } catch (Exception e) {
                 Log.w(AlarmStore.TAG, "Service de sonnerie refusé, notification seule", e);
+                AlarmStore.log(c, "ERREUR : service de sonnerie refusé par Android (" + e.getClass().getSimpleName() + ") → notification seule");
                 show(c, nid, a);
             }
         }

@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.17.2';
+const VERSION = '1.18.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -416,6 +416,82 @@ function nativePayload() {
 }
 
 let lastSync = { count: 0, until: null };
+/* ---------- Santé des alarmes : alarmes perdues ou manquées ---------- */
+/** À appeler AVANT syncNative : compare ce qu'Android a encore en mémoire avec ce qui devrait sonner. */
+async function checkHealth(reason) {
+  if (!Native || !Native.diag) return;
+  let d;
+  try { d = await Native.diag(); } catch (e) { return; }
+  const now = Date.now();
+  let fired = {};
+  try { fired = JSON.parse(d.fired || '{}'); } catch (e) { /* ignore */ }
+  // 1. Alarmes manquées : devaient sonner (36 h max) mais Android ne les a jamais déclenchées
+  const since = Math.max(Number(d.since) || now, now - 36 * 3600000);
+  const seen = new Set(S.settings.missedSeen || []);
+  const missed = [];
+  if (since < now - 90000) {
+    for (const a of S.alarms) {
+      if (!a.enabled) continue;
+      const ref = Math.max(a.updatedAt || 0, a.createdAt || 0);
+      for (const t of occurrences(a, new Date(since), new Date(now - 90000), 50)) {
+        if (t.getTime() <= ref) continue;
+        const nid = hashInt(a.id + '|' + t.getTime());
+        if (fired[nid] || seen.has(nid)) continue;
+        missed.push({ nid, id: a.id, title: a.title || 'Alarme', at: t.getTime() });
+      }
+    }
+  }
+  if (missed.length) {
+    S.missed = missed.sort((x, y) => x.at - y.at);
+    S.missedLogged = S.missedLogged || new Set();
+    for (const m of missed.filter(x => !S.missedLogged.has(x.nid) && S.missedLogged.add(x.nid))) try { await Native.addLog({ msg: `MANQUÉE : « ${m.title} » prévue ${fmtShort(new Date(m.at))} ${fmtTime(new Date(m.at))} n’a pas été déclenchée par Android` }); } catch (e) { /* ignore */ }
+  }
+  // 2. Alarmes perdues : Android n'a plus la prochaine sonnerie prévue
+  const next = nativePayload().filter(x => !x.timer && x.nid !== 1888888888)[0];
+  if (next && Number(d.stored) > 0) {
+    const nextAt = Number(d.nextAt) || 0;
+    const lost = d.nextOurs ? nextAt > next.at + 60000 : (!nextAt || nextAt > next.at + 60000);
+    if (lost) {
+      S.lost = true;
+      try { await Native.addLog({ msg: `PERDUES : Android n’avait plus la prochaine alarme (${fmtShort(new Date(next.at))} ${fmtTime(new Date(next.at))}) → l’appli a sans doute été arrêtée par le système. Reprogrammation.` }); } catch (e) { /* ignore */ }
+    }
+  }
+  if (reason) try { await Native.addLog({ msg: reason }); } catch (e) { /* ignore */ }
+}
+async function dismissMissed() {
+  const seen = new Set(S.settings.missedSeen || []);
+  for (const m of S.missed || []) seen.add(m.nid);
+  S.settings.missedSeen = [...seen].slice(-200);
+  S.missed = []; S.lost = false;
+  await saveSettings();
+}
+async function openJournal() {
+  let d = null;
+  try { d = await Native.diag(); } catch (e) { toast('Journal indisponible'); return; }
+  let log = [];
+  try { log = JSON.parse(d.log || '[]'); } catch (e) { /* ignore */ }
+  ED = null; BE = null; DP = null;
+  const line = o => { const t = new Date(o.t); const bad = /ERREUR|MANQUÉE|PERDUES/.test(o.m); return `<div class="logl${bad ? ' bad' : ''}"><span>${fmtShort(t)} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}</span>${esc(o.m)}</div>`; };
+  const nx = Number(d.nextAt) ? `${fmtShort(new Date(Number(d.nextAt)))} ${fmtTime(new Date(Number(d.nextAt)))}${d.nextOurs ? '' : ' (autre appli)'}` : 'aucune';
+  $('#sheet').innerHTML = `
+  <div class="sheet-head"><button data-jr="close">✕</button><h3>Journal des alarmes</h3><span></span></div>
+  <div class="sheet-body">
+    <p class="note" style="margin-top:0">${d.stored} sonnerie(s) en mémoire · prochaine alarme connue d’Android : <b>${nx}</b>.</p>
+    <div class="btns"><button class="btn small" data-jr="copy">📋 Copier</button><button class="btn small danger" data-jr="clear">Effacer</button></div>
+    <div class="journal">${log.length ? log.slice().reverse().map(line).join('') : '<p class="note">Vide pour l’instant.</p>'}</div>
+  </div>`;
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-jr]'); if (!b) return;
+    if (b.dataset.jr === 'close') { $('#sheet').onclick = null; closeSheet(); }
+    if (b.dataset.jr === 'copy') {
+      const txt = log.map(o => `${new Date(o.t).toLocaleString('fr-FR')} — ${o.m}`).join('\n');
+      try { await navigator.clipboard.writeText(txt); toast('Journal copié'); } catch (e) { toast('Copie impossible'); }
+    }
+    if (b.dataset.jr === 'clear' && confirm('Effacer le journal ?')) { await Native.clearLog(); $('#sheet').onclick = null; closeSheet(); toast('Journal effacé'); }
+  };
+  showSheet();
+}
+
 async function syncNative() {
   const list = nativePayload();
   const real = list.filter(x => x.nid !== 1888888888);
@@ -615,6 +691,12 @@ function renderListBody() {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  if (((S.missed && S.missed.length) || S.lost) && !S.selMode) {
+    const m = S.missed || [];
+    html += `<div class="card banner danger">⚠️ <b>${m.length ? (m.length > 1 ? m.length + ' alarmes manquées' : 'Alarme manquée') : 'Alarmes effacées par le système'}</b>
+      <div class="note">${m.slice(0, 3).map(x => `« ${esc(x.title)} » ${relDay(new Date(x.at))} à ${fmtTime(new Date(x.at))}`).join('<br>')}${m.length ? '<br>' : ''}${m.length > 1 ? 'Android ne les a pas déclenchées' : m.length ? 'Android ne l’a pas déclenchée' : 'Android n’avait plus tes prochaines alarmes'} : l’appli a sans doute été arrêtée par le système. Les prochaines sont reprogrammées. Vérifie le « Démarrage automatique » dans Réglages.</div>
+      <div class="btns" style="margin:8px 0 0"><button class="btn small" data-health="settings">Réglages</button><button class="btn small" data-health="journal">Journal</button><button class="btn small" data-health="ok">OK</button></div></div>`;
+  }
   if (schoolEnding() && !S.selMode) html += `<div class="card banner" data-goschool="1">🗓️ <b>Calendriers</b><div class="note">${esc(schoolEnding())} Touche ici.</div></div>`;
   if (S.update && !S.selMode) html += `<div class="card banner upd" data-goupdate="1">⬆️ <b>Nouvelle version ${esc(S.update.version)} disponible</b><div class="note">Touche ici pour mettre à jour (tes alarmes sont conservées).</div></div>`;
   if (backupDue() && !S.selMode) html += `<div class="card banner" data-gobackup="1">💾 <b>Pense à sauvegarder tes alarmes</b><div class="note">${backupStatus()} Touche ici pour le faire.</div></div>`;
@@ -2845,11 +2927,18 @@ async function renderSettings(v) {
     </div>
     <h2>Réglages realme / ColorOS à vérifier</h2>
     <div class="card note">
-      <div>• <b>Batterie</b> : Alarmes › « Autoriser l’activité en arrière-plan » et « Démarrage automatique ».</div>
+      <div><b>Indispensable pour que les alarmes ne soient pas effacées</b> quand tu balaies l’appli ou la nuit :</div>
+      <div style="margin-top:6px">• <b>Démarrage automatique</b> : active-le pour Alarmes.</div>
+      <div class="btns" style="margin:6px 0"><button class="btn small primary" data-open="autostart">Ouvrir « Démarrage automatique »</button></div>
+      <div>• <b>Batterie</b> : Alarmes › Utilisation de la batterie › « Autoriser l’activité en arrière-plan ».</div>
+      <div style="margin-top:6px">• <b>Applis récentes</b> : touche ⋮ (ou appui long) sur la carte Alarmes › <b>Verrouiller</b> (cadenas).</div>
       <div style="margin-top:6px">• <b>Notifications</b> : catégorie « Alarmes » avec Bannière et Écran de verrouillage cochés.</div>
       <div style="margin-top:6px">• <b>Accès spécial</b> (Paramètres › Applis) : « Afficher par-dessus d’autres applis » et, s’il existe, « Notifications plein écran » ou « Afficher sur l’écran de verrouillage ».</div>
       <div class="btns"><button class="btn small" data-open="app">Ouvrir la fiche de l’appli</button></div>
-    </div>` : `<div class="card"><b>Mode navigateur</b><p class="note">Ici, les alarmes ne sonnent que si la page est ouverte. Installe l'APK Android pour de vraies alarmes, même téléphone verrouillé.</p>
+    </div>
+    <h2>Journal des alarmes</h2>
+    <div class="card"><p class="note" style="margin-top:0">Chaque étape (programmation, alarme reçue, son lancé, écran affiché, erreurs). Utile si une alarme n’a pas sonné.</p>
+      <div class="btns"><button class="btn small" data-set="journal">📜 Voir le journal</button></div></div>` : `<div class="card"><b>Mode navigateur</b><p class="note">Ici, les alarmes ne sonnent que si la page est ouverte. Installe l'APK Android pour de vraies alarmes, même téléphone verrouillé.</p>
       ${'Notification' in window && Notification.permission !== 'granted' ? '<div class="btns"><button class="btn small" data-set="webnotif">Autoriser les notifications</button></div>' : ''}</div>`}
 
     <h2>Sonnerie par défaut</h2>
@@ -2975,6 +3064,7 @@ function bindSettings() {
     if (b.dataset.set === 'sharebackup') { await shareBackup(); return; }
     if (b.dataset.set === 'checkupdate') { toast('Recherche d’une mise à jour…'); const u = await checkUpdate(true); keepScroll(render); toast(u ? `Version ${u.version} disponible` : 'Tu as la dernière version'); return; }
     if (b.dataset.set === 'doupdate') { installUpdate(); return; }
+    if (b.dataset.set === 'journal') { openJournal(); return; }
     if (b.dataset.set === 'schooladd' || b.dataset.calrep) { S.calReplace = b.dataset.calrep || null; const i = $('#schoolFile'); i.value = ''; i.click(); return; }
     if (b.dataset.calren) {
       const c = calById(b.dataset.calren); const n = (prompt('Nouveau nom :', c.name) || '').trim();
@@ -3096,6 +3186,15 @@ function bindMain() {
   v.addEventListener('click', async e => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
     if (e.target.closest('[data-goupdate]')) { installUpdate(); return; }
+    const hb = e.target.closest('[data-health]');
+    if (hb) {
+      const k = hb.dataset.health;
+      if (k === 'journal') { openJournal(); return; }
+      await dismissMissed();
+      if (k === 'settings') { go('settings'); setTimeout(() => { const el = $('[data-open="autostart"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 400); }
+      else refreshView();
+      return;
+    }
     if (e.target.closest('[data-goschool]')) { go('settings'); setTimeout(() => { const el = $('[data-set="schooladd"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     if (e.target.closest('[data-gobackup]')) { go('settings'); setTimeout(() => { const el = $('[data-set="backup"]'); if (el) el.scrollIntoView({ block: 'center' }); }, 300); return; }
     const sb = e.target.closest('[data-sel]');
@@ -3170,6 +3269,7 @@ async function start() {
   if (await syncEvents()) render();
   S.lastUpdateCheck = Number(S.settings.lastUpdateCheck || 0) || null;
   checkUpdate(false).then(u => { if (u && S.tab === 'list') refreshView(); });
+  await checkHealth('Appli ouverte');
   await syncNative();
   if (Native) {
     try {
@@ -3181,6 +3281,7 @@ async function start() {
     document.addEventListener('visibilitychange', async () => {
       if (document.hidden) return;
       await syncEvents();
+      await checkHealth();
       await syncNative();
       if (S.tab !== 'import' && $('#sheet').hidden) refreshView();
     });

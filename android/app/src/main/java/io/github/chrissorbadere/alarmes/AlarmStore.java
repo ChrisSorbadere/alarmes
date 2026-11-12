@@ -29,7 +29,58 @@ public final class AlarmStore {
     static final String ACTION_SNOOZE = "io.github.chrissorbadere.alarmes.SNOOZE";
     static final int SNOOZE_BASE = 1900000000;
 
+    static final String KEY_LOG = "journal";
+    static final String KEY_FIRED = "declenchees";
+    static final String KEY_SINCE = "suivi_depuis";
+
     private AlarmStore() {}
+
+    /** Journal de diagnostic (300 dernières lignes). */
+    static synchronized void log(Context c, String msg) {
+        try {
+            SharedPreferences p = prefs(c);
+            JSONArray a = new JSONArray(p.getString(KEY_LOG, "[]"));
+            JSONObject last = a.length() > 0 ? a.optJSONObject(a.length() - 1) : null;
+            if (last != null && msg.equals(last.optString("m"))) {
+                last.put("t", System.currentTimeMillis());
+                p.edit().putString(KEY_LOG, a.toString()).apply();
+                return;
+            }
+            JSONObject o = new JSONObject();
+            o.put("t", System.currentTimeMillis());
+            o.put("m", msg);
+            a.put(o);
+            JSONArray out = new JSONArray();
+            for (int i = Math.max(0, a.length() - 300); i < a.length(); i++) out.put(a.get(i));
+            SharedPreferences.Editor e = p.edit().putString(KEY_LOG, out.toString());
+            if (!p.contains(KEY_SINCE)) e.putLong(KEY_SINCE, System.currentTimeMillis());
+            e.apply();
+        } catch (Exception ignored) {}
+        Log.i(TAG, msg);
+    }
+
+    /** Mémorise qu'une alarme a bien été reçue (pour repérer les alarmes manquées). */
+    static synchronized void markFired(Context c, int nid) {
+        try {
+            SharedPreferences p = prefs(c);
+            JSONObject f = new JSONObject(p.getString(KEY_FIRED, "{}"));
+            long now = System.currentTimeMillis();
+            f.put(String.valueOf(nid), now);
+            JSONObject out = new JSONObject();
+            java.util.Iterator<String> it = f.keys();
+            while (it.hasNext()) {
+                String k = it.next();
+                if (now - f.optLong(k) < 8L * 86400000L) out.put(k, f.optLong(k));
+            }
+            SharedPreferences.Editor e = p.edit().putString(KEY_FIRED, out.toString());
+            if (!p.contains(KEY_SINCE)) e.putLong(KEY_SINCE, now);
+            e.apply();
+        } catch (Exception ignored) {}
+    }
+
+    static String hm(long t) {
+        return new java.text.SimpleDateFormat("EEE d/MM HH:mm", java.util.Locale.FRANCE).format(new java.util.Date(t));
+    }
 
     static SharedPreferences prefs(Context c) {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -154,15 +205,26 @@ public final class AlarmStore {
         return kept.length();
     }
 
+    static String firstLabel(JSONArray list) {
+        JSONObject best = null;
+        for (int i = 0; i < list.length(); i++) {
+            JSONObject o = list.optJSONObject(i);
+            if (o != null && (best == null || o.optLong("at") < best.optLong("at"))) best = o;
+        }
+        return best == null ? "aucune" : hm(best.optLong("at")) + " « " + best.optString("title") + " »";
+    }
+
     /** Reprogramme après redémarrage ou mise à jour. */
-    static void rescheduleStored(Context c) {
+    static int rescheduleStored(Context c) {
         JSONArray list = load(c);
         long now = System.currentTimeMillis();
+        int n = 0;
         for (int i = 0; i < list.length(); i++) {
             JSONObject o = list.optJSONObject(i);
             if (o == null) continue;
             long at = o.optLong("at", 0);
-            if (at > now) scheduleOne(c, o.optInt("nid"), at, o);
+            if (at > now) { scheduleOne(c, o.optInt("nid"), at, o); n++; }
         }
+        return n;
     }
 }

@@ -95,9 +95,48 @@ public class AlarmNativePlugin extends Plugin {
             call.reject("Programmation impossible : " + e.getMessage());
             return;
         }
+        AlarmStore.log(c, "Programmation : " + n + " alarme(s) · prochaine " + AlarmStore.firstLabel(AlarmStore.load(c)));
         JSObject r = new JSObject();
         r.put("scheduled", n);
         call.resolve(r);
+    }
+
+    /** Journal + alarmes reçues + prochaine alarme connue d'Android (pour repérer les alarmes perdues ou manquées). */
+    @PluginMethod
+    public void diag(PluginCall call) {
+        Context c = getContext();
+        android.content.SharedPreferences p = AlarmStore.prefs(c);
+        JSObject r = new JSObject();
+        r.put("log", p.getString(AlarmStore.KEY_LOG, "[]"));
+        r.put("fired", p.getString(AlarmStore.KEY_FIRED, "{}"));
+        r.put("since", p.getLong(AlarmStore.KEY_SINCE, 0));
+        r.put("stored", AlarmStore.load(c).length());
+        long nextAt = 0;
+        boolean ours = false;
+        try {
+            android.app.AlarmManager am = (android.app.AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+            android.app.AlarmManager.AlarmClockInfo info = am.getNextAlarmClock();
+            if (info != null) {
+                nextAt = info.getTriggerTime();
+                android.app.PendingIntent si = info.getShowIntent();
+                ours = si != null && c.getPackageName().equals(si.getCreatorPackage());
+            }
+        } catch (Exception ignored) {}
+        r.put("nextAt", nextAt);
+        r.put("nextOurs", ours);
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void addLog(PluginCall call) {
+        AlarmStore.log(getContext(), call.getString("msg", ""));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void clearLog(PluginCall call) {
+        AlarmStore.prefs(getContext()).edit().remove(AlarmStore.KEY_LOG).apply();
+        call.resolve();
     }
 
     @PluginMethod
@@ -222,6 +261,29 @@ public class AlarmNativePlugin extends Plugin {
             case "battery":
                 i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + pkg));
                 break;
+            case "autostart": {
+                String[][] cands = {
+                    { "com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity" },
+                    { "com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity" },
+                    { "com.oplus.safecenter", "com.oplus.safecenter.permission.startup.StartupAppListActivity" },
+                    { "com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity" },
+                    { "com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity" },
+                    { "com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity" },
+                };
+                for (String[] cn : cands) {
+                    Intent t = new Intent().setComponent(new android.content.ComponentName(cn[0], cn[1]))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    try {
+                        getContext().startActivity(t);
+                        JSObject ok = new JSObject();
+                        ok.put("opened", "autostart");
+                        call.resolve(ok);
+                        return;
+                    } catch (Exception ignored) {}
+                }
+                i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
+                break;
+            }
             default:
                 i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
         }

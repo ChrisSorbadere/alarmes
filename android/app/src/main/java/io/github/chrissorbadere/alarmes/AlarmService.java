@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
@@ -88,6 +89,7 @@ public class AlarmService extends Service {
                 }
             } catch (Exception e) {
                 Log.w(AlarmStore.TAG, "startForeground impossible", e);
+                AlarmStore.log(this, "ERREUR : sonnerie refusée par Android (" + e.getClass().getSimpleName() + ") → notification seule");
                 AlarmReceiver.show(this, nid, a);
                 curNid = 0;
                 stopSelf();
@@ -97,7 +99,14 @@ public class AlarmService extends Service {
             acquireWakeLock(minutes * 60000L + 30000L);
             int fadeSec = Math.max(0, Math.min(300, a.optInt("fadeSec", 0)));
             if (a.optBoolean("maxVol", false)) raiseAlarmVolume();
-            startSound(a.optString("soundUri", ""), fadeSec);
+            boolean otherAudio = false;
+            try {
+                otherAudio = ((AudioManager) getSystemService(Context.AUDIO_SERVICE)).isMusicActive();
+            } catch (Exception ignored) {}
+            requestFocus();
+            startSound(a.optString("soundUri", ""), fadeSec, otherAudio);
+            AlarmStore.log(this, "Sonnerie lancée" + (player == null ? " (ERREUR : aucun son lisible)" : "")
+                + (otherAudio ? " · autre son en cours (mis en pause)" : ""));
             if (fadeSec > 0) {
                 handler.removeCallbacks(vibrateTask);
                 handler.postDelayed(vibrateTask, fadeSec * 500L);
@@ -118,6 +127,7 @@ public class AlarmService extends Service {
         if (nid == 0) nid = curNid;
 
         if (ACTION_STOP.equals(action)) {
+            AlarmStore.log(this, "Arrêtée");
             AlarmStore.cancelOne(this, AlarmStore.snoozeNidOf(nid));
             finishRing();
             nm.cancel(nid);
@@ -125,6 +135,7 @@ public class AlarmService extends Service {
         }
 
         if (ACTION_SNOOZE.equals(action)) {
+            AlarmStore.log(this, "Reportée");
             String j = json != null ? json : curJson;
             finishRing();
             nm.cancel(nid);
@@ -148,6 +159,7 @@ public class AlarmService extends Service {
             startActivity(i);
         } catch (Exception e) {
             Log.w(AlarmStore.TAG, "Ouverture de l'écran d'alarme refusée", e);
+            AlarmStore.log(this, "ERREUR : écran d'alarme refusé (" + e.getClass().getSimpleName() + ")");
         }
     }
 
@@ -158,6 +170,7 @@ public class AlarmService extends Service {
         JSONObject a = parse(json);
         int done = a.optInt("ringIndex", 0);
         int max = Math.max(0, Math.min(5, a.optInt("repeats", 0)));
+        AlarmStore.log(this, "Pas de réponse pendant la durée de sonnerie" + (done < max ? " → nouvelle sonnerie programmée" : ""));
         finishRing();
         if (done < max) {
             long at = AlarmReceiver.snooze(this, nid, json, done + 1);
@@ -246,21 +259,55 @@ public class AlarmService extends Service {
         savedAlarmVolume = -1;
     }
 
-    private void startSound(String soundUri, int fadeSec) {
+    // ---------- Priorité audio : met en pause podcasts et musique pendant l'alarme ----------
+    private AudioFocusRequest focusReq = null;
+    private final AudioManager.OnAudioFocusChangeListener focusListener = fc -> {};
+
+    private void requestFocus() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (focusReq == null) focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(alarmAttributes())
+                    .setOnAudioFocusChangeListener(focusListener)
+                    .build();
+                am.requestAudioFocus(focusReq);
+            } else {
+                am.requestAudioFocus(focusListener, AudioManager.STREAM_ALARM, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+            }
+        } catch (Exception e) {
+            Log.w(AlarmStore.TAG, "Priorité audio refusée", e);
+        }
+    }
+
+    private void abandonFocus() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (focusReq != null) am.abandonAudioFocusRequest(focusReq);
+            } else {
+                am.abandonAudioFocus(focusListener);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void startSound(String soundUri, int fadeSec, boolean otherAudio) {
         startSound(soundUri);
         if (player == null || fadeSec <= 0) return;
         final long start = System.currentTimeMillis();
         final long total = fadeSec * 1000L;
         final MediaPlayer mp = player;
+        // un autre son jouait : on part d'un niveau déjà audible
+        final float floor = otherAudio ? 0.35f : 0.02f;
         try {
-            mp.setVolume(0.02f, 0.02f);
+            mp.setVolume(floor, floor);
         } catch (Exception ignored) {}
         fadeTask = new Runnable() {
             @Override
             public void run() {
                 if (player != mp) return;
                 float t = Math.min(1f, (System.currentTimeMillis() - start) / (float) total);
-                float v = Math.max(0.02f, t * t);
+                float v = Math.max(floor, t * t);
                 try {
                     mp.setVolume(v, v);
                 } catch (Exception ignored) {}
@@ -315,6 +362,7 @@ public class AlarmService extends Service {
         fadeTask = null;
         restoreAlarmVolume();
         stopSound();
+        abandonFocus();
         if (vibrator != null) {
             try {
                 vibrator.cancel();

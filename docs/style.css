@@ -355,3 +355,9 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .selbtns.two { grid-template-columns: 1fr 1fr; margin-bottom: 6px; }
 .cal-day .dpn { position: absolute; top: 1px; right: 3px; font-size: 9px; font-weight: 600; opacity: .85; }
 .cal-day.dpd { color: var(--danger, #dc2626); }
+.banner.danger { background: #fee2e2; border-color: #f87171; color: #7f1d1d; cursor: default; }
+.banner.danger .note { color: #991b1b; }
+.journal { margin-top: 10px; font-size: 13px; }
+.logl { padding: 6px 0; border-top: 1px solid var(--line); line-height: 1.35; }
+.logl span { display: block; font-size: 11px; opacity: .65; }
+.logl.bad { color: var(--danger, #dc2626); font-weight: 600; }

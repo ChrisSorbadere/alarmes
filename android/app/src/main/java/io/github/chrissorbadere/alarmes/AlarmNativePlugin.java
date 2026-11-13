@@ -261,29 +261,6 @@ public class AlarmNativePlugin extends Plugin {
             case "battery":
                 i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + pkg));
                 break;
-            case "autostart": {
-                String[][] cands = {
-                    { "com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity" },
-                    { "com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity" },
-                    { "com.oplus.safecenter", "com.oplus.safecenter.permission.startup.StartupAppListActivity" },
-                    { "com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity" },
-                    { "com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity" },
-                    { "com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity" },
-                };
-                for (String[] cn : cands) {
-                    Intent t = new Intent().setComponent(new android.content.ComponentName(cn[0], cn[1]))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    try {
-                        getContext().startActivity(t);
-                        JSObject ok = new JSObject();
-                        ok.put("opened", "autostart");
-                        call.resolve(ok);
-                        return;
-                    } catch (Exception ignored) {}
-                }
-                i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
-                break;
-            }
             default:
                 i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
         }

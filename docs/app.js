@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.18.0';
+const VERSION = '1.19.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -193,6 +193,39 @@ function dayRings(sc, d) {
   return ruleMatches(sc, d);
 }
 
+/* ---------- Heure relative : « X min avant le 1er cours » ---------- */
+const isRel = a => !!(a && a.schedule && a.schedule.type === 'weekly' && a.schedule.schoolOnly && a.schedule.rel);
+const minusMin = (hm, n) => { const [h, m] = hm.split(':').map(Number); let t = h * 60 + m - n; t = Math.max(0, t); return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`; };
+/** Heures de début des cours d'un jour, d'après les calendriers cochés qui ont des horaires. */
+function courseTimes(sc, ds) {
+  const ts = [];
+  for (const id of calIdsOf(sc)) { const c = calById(id); if (c && c.times && c.times[ds]) ts.push(...c.times[ds]); }
+  return [...new Set(ts)].sort();
+}
+const calsWithTimes = sc => calIdsOf(sc).filter(id => { const c = calById(id); return c && c.times && Object.keys(c.times).length; });
+/** Heures de sonnerie d'une alarme pour un jour donné (plusieurs possibles : matin + après-midi). */
+function ringTimes(a, ds) {
+  if (!isRel(a)) return [a.time];
+  const rel = a.schedule.rel, ts = courseTimes(a.schedule, ds);
+  const am = ts.find(t => t < '13:00'), pm = ts.find(t => t >= '13:00');
+  const out = [];
+  if (am && rel.which !== 'pm') out.push(minusMin(am, rel.before));
+  if (pm && rel.which !== 'am') out.push(minusMin(pm, rel.before));
+  return out;
+}
+function relLabel(rel) {
+  return `${rel.before} min avant le 1er cours ${rel.which === 'am' ? 'du matin' : rel.which === 'pm' ? 'de l’après-midi' : 'du matin et de l’après-midi'}`;
+}
+/** Résumé par jour de la semaine sur les 4 prochaines semaines : « lun 09:20 · 13:20 ». */
+function relPreview(a) {
+  const by = {};
+  const occ = occurrences(a, new Date(), addDays(new Date(), 35), 200);
+  const days = {};
+  for (const d of occ) (days[ymd(d)] = days[ymd(d)] || []).push(fmtTime(d));
+  for (const [ds, ts] of Object.entries(days)) { const w = parseYmd(ds).getDay(); (by[w] = by[w] || new Set()).add(ts.join(' · ')); }
+  return WD_ORDER.filter(w => by[w]).map(w => `${JOURS[w].slice(0, 3)} ${[...by[w]].join(' ou ')}`).join(' | ');
+}
+
 /** Occurrences (objets Date) entre from et to inclus. */
 function occurrences(a, from, to, limit = 1000) {
   const out = [];
@@ -209,8 +242,10 @@ function occurrences(a, from, to, limit = 1000) {
   const end = new Date(to);
   for (let i = 0; i < 3700 && d <= end && out.length < limit; i++) {
     if (dayRings(sc, d)) {
-      const t = atTime(ymd(d), a.time);
-      if (t >= from && t <= to) out.push(t);
+      for (const hm of ringTimes(a, ymd(d))) {
+        const t = atTime(ymd(d), hm);
+        if (t >= from && t <= to) out.push(t);
+      }
     }
     d = addDays(d, 1);
   }
@@ -239,7 +274,7 @@ function scheduleSummary(a) {
   } else if (sc.type === 'daily') s = 'Chaque jour';
   else if (sc.type === 'weekly') {
     const w = WD_ORDER.filter(x => sc.weekdays.includes(x)).map(x => JOURS[x].slice(0, 3));
-    if (sc.schoolOnly) s = (sc.dayOffset ? 'Veille des jours : ' : 'Jours : ') + calNames(sc) + (w.length && w.length < 7 ? ' (' + w.join(', ') + ')' : '');
+    if (sc.schoolOnly) s = (sc.rel ? relLabel(sc.rel) + ' · ' : '') + (sc.dayOffset ? 'Veille des jours : ' : 'Jours : ') + calNames(sc) + (w.length && w.length < 7 ? ' (' + w.join(', ') + ')' : '');
     else s = w.length === 7 ? 'Chaque jour' : w.length ? 'Chaque ' + w.join(', ') : 'Aucun jour';
   } else if (sc.type === 'monthly') {
     const m = [...sc.monthDays].sort((x, y) => (x === -1) - (y === -1) || x - y).map(x => x === -1 ? 'dernier jour' : x);
@@ -629,7 +664,7 @@ function alarmCard(a, when) {
   const picking = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   const picked = picking && S.sel.has(a.id);
   return `<div class="card alarm ${a.enabled ? '' : 'off'} ${picked ? 'picked' : ''}" style="--c:${colorOf(a)}" ${picking ? `data-pick="${a.id}"` : `data-open="${a.id}"`}>
-      <div class="time">${esc(a.time)}</div>
+      <div class="time">${esc(isRel(a) ? (when ? fmtTime(when) : '⏱') : a.time)}</div>
       <div class="info">
         <div class="title">${esc(a.title || 'Sans titre')}</div>
         <div class="sub">${esc(sub)}</div>
@@ -813,7 +848,7 @@ async function selAction(act) {
 }
 
 /* ---------- Alarmes semblables et choix des dates ---------- */
-const simKey = a => norm((a.title || '').trim()) + '|' + a.time;
+const simKey = a => norm((a.title || '').trim()) + '|' + (isRel(a) ? 'rel' : a.time);
 function similarOf(a) { const k = simKey(a); return S.alarms.filter(b => simKey(b) === k); }
 /** Garde en mémoire les dates importées supprimées à la main, pour ne pas les recréer au prochain import. */
 async function rememberDeleted(list) {
@@ -826,6 +861,110 @@ async function rememberDeleted(list) {
 }
 
 let DP = null; // choix des dates en cours
+
+/* ---------- Alarmes proches (à moins de 30 min) lors de l'enregistrement ---------- */
+let CF = null;
+/** Regroupe (par titre + heure) les autres alarmes qui sonnent le même jour à moins de tol minutes de l'alarme a. */
+function findNear(a, tol = 30) {
+  const from = new Date(), to = addDays(from, 400);
+  const mine = {};
+  for (const d of occurrences(a, from, to, 2000)) (mine[ymd(d)] = mine[ymd(d)] || []).push(d.getTime());
+  if (!Object.keys(mine).length) return [];
+  const ok = new Set(a.okWith || []);
+  const groups = new Map();
+  for (const b of S.alarms) {
+    if (b.id === a.id || !b.enabled || ok.has(b.id) || (b.okWith || []).includes(a.id)) continue;
+    for (const d of occurrences(b, from, to, 2000)) {
+      const ts = mine[ymd(d)];
+      if (!ts || !ts.some(t => Math.abs(t - d.getTime()) <= tol * 60000)) continue;
+      const k = simKey(b);
+      if (!groups.has(k)) groups.set(k, { key: k, title: b.title || 'Alarme', time: isRel(b) ? null : b.time, hits: [], del: false, pick: null });
+      groups.get(k).hits.push({ id: b.id, ds: ymd(d), at: d.getTime() });
+    }
+  }
+  return [...groups.values()].map(g => (g.hits.sort((x, y) => x.at - y.at), g));
+}
+
+function openConflicts(groups) {
+  CF = { groups, open: null };
+  renderConflicts();
+  $('#sheet').scrollTop = 0;
+}
+
+function renderConflicts() {
+  const n = CF.groups.reduce((t, g) => t + g.hits.length, 0);
+  const myT = isRel(ED) ? relLabel(ED.schedule.rel) : ED.time;
+  $('#sheet').innerHTML = `
+  <div class="sheet-head"><button data-cf="back">‹</button><h3>Alarmes proches</h3><span></span></div>
+  <div class="sheet-body">
+    <div class="card note" style="margin-top:0">« <b>${esc(ED.title || 'Alarme')}</b> » (${esc(myT)}) sonnera <b>à moins de 30 min</b> d’autres alarmes, ${n} fois.
+      Pour chacune, choisis de <b>garder les deux</b> ou de <b>supprimer l’ancienne</b> sur ces jours-là. Ton choix vaut pour toutes les dates (et l’appli ne reposera plus la question pour celles que tu gardes).</div>
+    ${CF.groups.map((g, i) => {
+      const nDel = g.pick ? g.pick.size : (g.del ? g.hits.length : 0);
+      return `<div class="card cfg">
+        <div class="row"><div><b>« ${esc(g.title)} »</b> ${g.time ? esc(g.time) : ''}<div class="note" style="margin:0">${g.hits.length} fois · ex. ${g.hits.slice(0, 3).map(h => `${fmtShort(new Date(h.at))} ${fmtTime(new Date(h.at))}`).join(', ')}${g.hits.length > 3 ? '…' : ''}</div></div></div>
+        <div class="seg" style="margin-top:8px">
+          <button data-cfk="${i}" class="${!nDel ? 'on' : ''}">Garder les deux</button>
+          <button data-cfd="${i}" class="${nDel && nDel === g.hits.length ? 'on' : ''}">Supprimer l’ancienne</button>
+        </div>
+        <button class="linkbtn" data-cfo="${i}">${CF.open === i ? '▲ Masquer les dates' : '▼ Choisir date par date'}${nDel && nDel < g.hits.length ? ` (${nDel} à supprimer)` : ''}</button>
+        ${CF.open === i ? `<div class="cfdates">${g.hits.map((h, j) => { const on = g.pick ? g.pick.has(j) : g.del; return `<button class="chip ${on ? 'del' : ''}" data-cfx="${i}:${j}">${on ? '✕ ' : ''}${fmtShort(new Date(h.at))} ${fmtTime(new Date(h.at))}</button>`; }).join('')}
+          <p class="note">Touche une date pour la supprimer (✕) ou la garder.</p></div>` : ''}
+      </div>`;
+    }).join('')}
+    <div class="btns">
+      <button class="btn primary" data-cf="apply">Enregistrer</button>
+      <button class="btn" data-cf="back">Retour à l’alarme</button>
+    </div>
+  </div>`;
+}
+
+async function conflictClick(e) {
+  const b = e.target.closest('button'); if (!b) return;
+  const keep = () => { const y = $('#sheet').scrollTop; renderConflicts(); $('#sheet').scrollTop = y; };
+  const G = i => CF.groups[Number(i)];
+  if (b.dataset.cfk !== undefined) { const g = G(b.dataset.cfk); g.del = false; g.pick = null; keep(); return; }
+  if (b.dataset.cfd !== undefined) { const g = G(b.dataset.cfd); g.del = true; g.pick = null; keep(); return; }
+  if (b.dataset.cfo !== undefined) { const i = Number(b.dataset.cfo); CF.open = CF.open === i ? null : i; keep(); return; }
+  if (b.dataset.cfx) {
+    const [i, j] = b.dataset.cfx.split(':').map(Number); const g = G(i);
+    if (!g.pick) g.pick = new Set(g.del ? g.hits.map((_, k) => k) : []);
+    g.pick.has(j) ? g.pick.delete(j) : g.pick.add(j);
+    g.del = g.pick.size === g.hits.length;
+    keep(); return;
+  }
+  if (b.dataset.cf === 'back') { CF = null; renderEditor(); return; }
+  if (b.dataset.cf === 'apply') {
+    const removed = [];
+    let nDel = 0;
+    ED.okWith = ED.okWith || [];
+    for (const g of CF.groups) {
+      g.hits.forEach((h, j) => {
+        const del = g.pick ? g.pick.has(j) : g.del;
+        const x = S.alarms.find(y => y.id === h.id);
+        if (!x) return;
+        if (!del) { if (!ED.okWith.includes(x.id)) ED.okWith.push(x.id); return; }
+        nDel++;
+        if (x.schedule.type === 'dates') {
+          x.schedule.dates = x.schedule.dates.filter(d => d !== h.ds);
+          if (!x.schedule.dates.length) removed.push(x);
+        } else {
+          x.schedule.except = [...new Set([...(x.schedule.except || []), h.ds])];
+          x.schedule.extra = (x.schedule.extra || []).filter(d => d !== h.ds);
+        }
+        x.updatedAt = Date.now();
+      });
+    }
+    await rememberDeleted(removed);
+    const rm = new Set(removed.map(x => x.id));
+    S.alarms = S.alarms.filter(x => !rm.has(x.id));
+    ED.okWith = ED.okWith.filter(id => !rm.has(id));
+    CF = null;
+    renderEditor();
+    await editorAction('save', { dataset: { ed: 'savenow' } });
+    if (nDel) toast(`Enregistrée · ${nDel} sonnerie(s) en double supprimée(s)`, 4000);
+  }
+}
 
 function openDatesPicker(ids) {
   ED = null; BE = null;
@@ -1317,7 +1456,7 @@ function calSummary(c) {
   const d = c.days;
   const a = parseYmd(d[0]), b = parseYmd(d[d.length - 1]);
   const m = x => { const n = MOIS[x.getMonth()]; return n.length <= 4 ? n : n.slice(0, n.startsWith('juil') ? 5 : 4) + '.'; };
-  return `${d.length} jours · ${m(a)} ${a.getFullYear()} → ${m(b)} ${b.getFullYear()}`;
+  return `${d.length} jours · ${m(a)} ${a.getFullYear()} → ${m(b)} ${b.getFullYear()}${c.times && Object.keys(c.times).length ? ' · avec horaires des cours' : ''}`;
 }
 /** Lit un fichier (Excel, CSV, ICS) et garde ses dates. replaceId = calendrier à remplacer, sinon nouveau. */
 async function importCalFile(file, replaceId) {
@@ -1328,25 +1467,56 @@ async function importCalFile(file, replaceId) {
     const map = autoMap(rows[hr] || []);
     const col = map.date !== undefined ? map.date : 0;
     const sy = defaultSchoolYear();
-    const days = [];
+    const days = [], times = {};
     for (const r of rows.slice(hr + 1)) {
       const dt = parseDateCell(r[col], mo => (mo >= 8 ? sy : sy + 1));
-      if (dt) days.push(`${dt.y}-${pad(dt.m)}-${pad(dt.d)}`);
+      if (!dt) continue;
+      const ds = `${dt.y}-${pad(dt.m)}-${pad(dt.d)}`;
+      days.push(ds);
+      const t = map.time !== undefined ? parseTimeCell(r[map.time]) : null;
+      if (t) (times[ds] = times[ds] || []).push(t);
     }
     if (!days.length) { toast('Aucune date trouvée dans ce fichier', 4000); return false; }
+    for (const k of Object.keys(times)) times[k] = [...new Set(times[k])].sort();
+    const hasTimes = Object.keys(times).length > 0;
     const sorted = [...new Set(days)].sort();
     let c = replaceId && calById(replaceId);
-    if (c) Object.assign(c, { days: sorted, importedAt: Date.now() });
+    if (c) { Object.assign(c, { days: sorted, importedAt: Date.now() }); if (hasTimes) c.times = times; else delete c.times; }
     else {
       const name = (prompt('Nom de ce calendrier (ex. « Mon emploi du temps », « Calendrier de mon épouse ») :', parsed.name) || '').trim() || parsed.name;
       c = { id: uid(), name, days: sorted, importedAt: Date.now() };
+      if (hasTimes) c.times = times;
       S.cals.push(c);
     }
     await saveCals();
-    toast(`« ${c.name} » : ${c.days.length} jours`, 3500);
+    toast(`« ${c.name} » : ${c.days.length} jours${hasTimes ? ' avec les horaires des cours' : ''}`, 3500);
     return true;
   } catch (e) { toast('Fichier illisible : ' + (e.message || e), 4000); return false; }
 }
+function relPanelHTML(sc) {
+  const withT = calsWithTimes(sc);
+  if (!withT.length) {
+    return sc.rel ? '' : `<p class="note" style="margin-top:10px">💡 Pour sonner <b>avant tes cours</b> (heure qui change selon le jour), enregistre ton calendrier <b>avec les horaires</b> (fichier des séances : colonnes Date + Créneau) dans Réglages › Calendriers.</p>`;
+  }
+  const rel = sc.rel;
+  return `
+    <label class="f">Heure de sonnerie</label>
+    <div class="seg">
+      <button data-rel="off" class="${!rel ? 'on' : ''}">Heure fixe</button>
+      <button data-rel="on" class="${rel ? 'on' : ''}">Avant le 1er cours</button>
+    </div>
+    ${rel ? `
+      <div class="seg" style="margin-top:8px">
+        <button data-relw="am" class="${rel.which === 'am' ? 'on' : ''}">Matin</button>
+        <button data-relw="pm" class="${rel.which === 'pm' ? 'on' : ''}">Après-midi</button>
+        <button data-relw="both" class="${rel.which === 'both' ? 'on' : ''}">Les deux</button>
+      </div>
+      <div class="relrow"><span>Sonner</span><input type="number" id="edRelBefore" min="0" max="240" step="5" value="${rel.before}"><span>min avant</span></div>
+      <div class="chips">${[20, 30, 40, 45, 60].map(n => `<button class="chip ${rel.before === n ? 'on' : ''}" data-relb="${n}">${n} min</button>`).join('')}</div>
+      <p class="note relprev" id="edRelPrev">${esc(relPreview(ED) || 'Aucun cours trouvé dans les 5 prochaines semaines.')}</p>
+      <p class="note" style="margin-top:0">L’heure est calculée chaque jour d’après tes horaires (semaines A et B comprises). « Matin » = 1er cours avant 13 h.</p>` : ''}`;
+}
+
 function weeklyPanelHTML(sc) {
   const has = S.cals && S.cals.length;
   const ids = calIdsOf(sc);
@@ -1368,10 +1538,11 @@ function weeklyPanelHTML(sc) {
       ${sc.schoolOnly && has ? `
         ${S.cals.length > 1 ? `<div class="chips calpick" style="margin-top:10px">${S.cals.map(c => `<button class="chip ${ids.includes(c.id) ? 'on' : ''}" data-calpick="${c.id}">${ids.includes(c.id) ? '✓ ' : ''}${esc(c.name)}</button>`).join('')}</div>
           <p class="note" style="margin-top:4px">${ids.length > 1 ? 'Sonne si le jour est dans <b>l’un ou l’autre</b> calendrier (sans double sonnerie).' : 'Coche plusieurs calendriers pour sonner les jours de l’un <b>ou</b> de l’autre.'}</p>` : ''}
-        <div class="seg" style="margin-top:10px">
+        ${relPanelHTML(sc)}
+        ${sc.rel ? '' : `<div class="seg" style="margin-top:10px">
           <button data-school="0" class="${!sc.dayOffset ? 'on' : ''}">Le jour même</button>
           <button data-school="-1" class="${sc.dayOffset === -1 ? 'on' : ''}">La veille</button>
-        </div>
+        </div>`}
         <p class="note">${sc.weekdays.length ? `Ne sonne que les <b>${WD_ORDER.filter(x => sc.weekdays.includes(x)).map(x => JOURS[x]).join(', ')}</b> du calendrier. Touche « Aucun » pour sonner <b>tous</b> les jours du calendrier` : '<b>Tous les jours du calendrier.</b> Coche des jours pour n’en garder que certains'}${sc.dayOffset === -1 ? ' · sonne la veille (ex. lundi coché → dimanche)' : ''}.</p>` : ''}
       ${!has ? '<p class="note" style="margin:6px 0 0">À enregistrer une fois par an dans <b>Réglages › Calendriers</b>.</p>' : ''}
     </div>`;
@@ -1699,7 +1870,7 @@ function showSheet() {
 function closeSheet(fromPop) {
   const s = $('#sheet');
   const wasOpen = !s.hidden;
-  s.hidden = true; s.innerHTML = ''; ED = null; BE = null; DP = null;
+  s.hidden = true; s.innerHTML = ''; ED = null; BE = null; DP = null; CF = null;
   document.body.classList.remove('lock');
   if (wasOpen && !fromPop && history.state && history.state.sheet) history.back();
 }
@@ -1734,7 +1905,10 @@ function renderEditor() {
     <button class="save" data-ed="save">Enregistrer</button>
   </div>
   <div class="sheet-body">
-    ${a._isNew ? `<button class="quickswitch" data-ed="quick">⚡ <b>Alarme rapide</b><span>aujourd’hui, en deux touchers</span></button>` : ''}
+    ${a._isNew ? `<button class="quickswitch" data-ed="quick">⚡ <b>Alarme rapide</b><span>aujourd’hui, en deux touchers</span></button>
+    <div class="tpls"><div class="note" style="margin:0 0 6px">Modèles (l’appli remplit tout, tu n’as plus qu’à vérifier) :</div>
+      <button class="chip" data-tpl="lever">🌅 Se lever les jours de travail</button>
+      <button class="chip" data-tpl="cours">🏫 Avant mes cours</button></div>` : ''}
     <label class="f">Titre</label>
     <input type="text" id="edTitle" value="${esc(a.title)}" placeholder="Ex. : rendre les copies de 5B">
 
@@ -1742,7 +1916,7 @@ function renderEditor() {
     <textarea id="edDesc" placeholder="Tout ce que tu veux te rappeler…">${esc(a.description)}</textarea>
 
     <label class="f">Heure${a.event ? ' (suit l’événement lié)' : ''}</label>
-    ${wheelTimeHTML('edTime', a.time, !!a.event)}
+    ${isRel(a) ? `<div class="card note relbadge">⏱ <b>${esc(relLabel(a.schedule.rel))}</b> — réglé plus bas, dans « Seulement les jours du calendrier ».</div>` : wheelTimeHTML('edTime', a.time, !!a.event)}
     <label class="f">Type</label>
     <select id="edMode">
       <option value="alarm" ${a.mode !== 'notif' ? 'selected' : ''}>Sonnerie d'alarme</option>
@@ -1955,7 +2129,8 @@ function readEditorFields() {
   const g = id => document.getElementById(id);
   ED.title = g('edTitle').value.trim();
   ED.description = g('edDesc').value;
-  ED.time = g('edTime').value || '07:30';
+  if (g('edTime')) ED.time = g('edTime').value || '07:30';
+  if (g('edRelBefore') && ED.schedule.rel) ED.schedule.rel.before = Math.max(0, Math.min(240, Number(g('edRelBefore').value) || 0));
   if (g('edEvOffset')) { ED.eventOffset = Number(g('edEvOffset').value) || 0; applyEventSchedule(ED); }
   ED.mode = g('edMode').value;
   if (g('edDur')) {
@@ -2040,9 +2215,10 @@ async function editorAction(act, el) {
       if (sc.type === 'weekly' && !sc.weekdays.length && !sc.schoolOnly) { toast('Choisis au moins un jour de la semaine.'); return; }
       if (sc.type === 'monthly' && !sc.monthDays.length) { toast('Choisis au moins un jour du mois.'); return; }
       if (!ED.title) ED.title = ED.description.split('\n')[0].slice(0, 60) || 'Alarme';
-      if (isSchoolAlarm(ED)) {
-        const hits = findClashes([ED], S.alarms.filter(x => x.id !== ED.id && isImported(x)));
-        if (hits.length && !confirm(clashMessage(hits, 'Cette alarme « selon calendrier » sonne au même moment que des alarmes importées depuis un fichier.', 'Enregistrer quand même ?'))) return;
+      if (isRel(ED) && !occurrences(ED, new Date(), addDays(new Date(), 400), 1).length) { toast('Aucun cours trouvé : vérifie le calendrier coché (il doit avoir les horaires).', 4500); return; }
+      if (!el || el.dataset.ed !== 'savenow') {
+        const groups = findNear(ED);
+        if (groups.length) { openConflicts(groups); return; }
       }
       const isNew = ED._isNew;
       delete ED._isNew; delete ED._calMonth;
@@ -2156,6 +2332,7 @@ function bindSheet() {
   s.addEventListener('click', async e => {
     if (BE) return bulkClick(e);
     if (DP) return datesClick(e);
+    if (CF) return conflictClick(e);
     if (!ED) {
       const d = e.target.closest('[data-dt]');
       if (d) {
@@ -2223,6 +2400,34 @@ function bindSheet() {
       else sc.dayOffset = Number(btn.dataset.school);
       const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
     }
+    if (btn.dataset.rel || btn.dataset.relw || btn.dataset.relb) {
+      readEditorFields();
+      if (btn.dataset.rel === 'on') { sc.rel = sc.rel || { which: 'both', before: 40 }; sc.dayOffset = 0; sc.weekdays = []; sc.calIds = calsWithTimes(sc); }
+      if (btn.dataset.rel === 'off') delete sc.rel;
+      if (btn.dataset.relw && sc.rel) sc.rel.which = btn.dataset.relw;
+      if (btn.dataset.relb && sc.rel) sc.rel.before = Number(btn.dataset.relb);
+      const y = $('#sheet').scrollTop; renderEditor(); $('#sheet').scrollTop = y; return;
+    }
+    if (btn.dataset.tpl) {
+      readEditorFields();
+      if (!S.cals.length) { toast('Enregistre d’abord tes calendriers dans Réglages › Calendriers', 4000); return; }
+      const ns = newSchedule('weekly');
+      ns.weekdays = []; ns.schoolOnly = true; ns.start = ymd(today0());
+      if (btn.dataset.tpl === 'lever') {
+        ns.calIds = S.cals.map(c => c.id);
+        Object.assign(ED, { title: ED.title || 'Debout', time: '06:45', schedule: ns });
+        toast('Modèle appliqué : vérifie l’heure et les calendriers, puis Enregistrer', 4000);
+      } else {
+        const wt = S.cals.filter(c => c.times && Object.keys(c.times).length);
+        if (!wt.length) { toast('Il faut un calendrier avec les horaires des cours (Réglages › Calendriers)', 4500); return; }
+        ns.calIds = [wt[0].id]; ns.rel = { which: 'both', before: 40 };
+        Object.assign(ED, { title: ED.title || 'Partir au lycée', schedule: ns });
+        toast('Modèle appliqué : choisis matin/après-midi et le délai, puis Enregistrer', 4000);
+      }
+      renderEditor();
+      setTimeout(() => { const el = $('.schoolbox'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
+      return;
+    }
     if (btn.dataset.calpick) {
       readEditorFields();
       const cur = calIdsOf(sc), id = btn.dataset.calpick;
@@ -2274,6 +2479,7 @@ function bindSheet() {
       refreshEditorCalendar();
     }
     if (e.target.id === 'edTime' || e.target.id === 'edStart' || e.target.id === 'edEnd') { readEditorFields(); refreshEditorCalendar(); }
+    if (e.target.id === 'edRelBefore') { readEditorFields(); const pv = $('#edRelPrev'); if (pv) pv.textContent = relPreview(ED) || '—'; refreshEditorCalendar(); }
     if (e.target.id === 'edEvOffset') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
@@ -2319,7 +2525,7 @@ function openDetail(id) {
     <div class="detail-hero" style="--c:${colorOf(a)}">
       <div class="lvl">${esc(levelOf(a) && !a.customColor ? levelOf(a).label : 'Alarme')}${a.mode === 'notif' ? ' · rappel discret' : ''}</div>
       <h3>${esc(a.title || 'Alarme')}</h3>
-      <div class="when">${a.time} · ${esc(scheduleSummary(a))}</div>
+      <div class="when">${isRel(a) ? esc(relLabel(a.schedule.rel)) : a.time} · ${esc(scheduleSummary(a))}</div>
       ${a.mode !== 'notif' ? `<div class="when" style="font-size:13px;opacity:.85;margin-top:4px">🎵 ${esc(ringSummary(a))}</div>` : ''}
     </div>
     <label class="f">Description</label>
@@ -2929,7 +3135,8 @@ async function renderSettings(v) {
     <div class="card note">
       <div><b>Indispensable pour que les alarmes ne soient pas effacées</b> quand tu balaies l’appli ou la nuit :</div>
       <div style="margin-top:6px">• <b>Démarrage automatique</b> : active-le pour Alarmes.</div>
-      <div class="btns" style="margin:6px 0"><button class="btn small primary" data-open="autostart">Ouvrir « Démarrage automatique »</button></div>
+      <div class="btns" style="margin:6px 0"><button class="btn small primary" data-open="autostart">Ouvrir la fiche de l’appli</button></div>
+      <div class="note" style="margin:0 0 6px">Puis : Utilisation de la batterie › « Démarrage automatique ».</div>
       <div>• <b>Batterie</b> : Alarmes › Utilisation de la batterie › « Autoriser l’activité en arrière-plan ».</div>
       <div style="margin-top:6px">• <b>Applis récentes</b> : touche ⋮ (ou appui long) sur la carte Alarmes › <b>Verrouiller</b> (cadenas).</div>
       <div style="margin-top:6px">• <b>Notifications</b> : catégorie « Alarmes » avec Bannière et Écran de verrouillage cochés.</div>

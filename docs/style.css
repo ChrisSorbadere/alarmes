@@ -361,3 +361,14 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .logl { padding: 6px 0; border-top: 1px solid var(--line); line-height: 1.35; }
 .logl span { display: block; font-size: 11px; opacity: .65; }
 .logl.bad { color: var(--danger, #dc2626); font-weight: 600; }
+.tpls { margin: 10px 0 4px; display: flex; flex-wrap: wrap; gap: 6px; }
+.tpls .note { width: 100%; }
+.relrow { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; }
+.relrow input { width: 80px; text-align: center; }
+.relprev { font-weight: 600; }
+.relbadge { margin: 0; }
+.linkbtn { background: none; border: 0; color: var(--accent, #2563eb); padding: 8px 0 0; font: inherit; font-size: 14px; cursor: pointer; }
+.cfdates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cfdates .note { width: 100%; }
+.chip.del { background: #fee2e2; border-color: #f87171; color: #991b1b; text-decoration: line-through; }
+.cfg { margin-top: 10px; }

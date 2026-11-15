@@ -131,6 +131,14 @@ public class AlarmNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void clockBackup(PluginCall call) {
+        long at = call.getData().optLong("at", 0);
+        JSObject r = new JSObject();
+        r.put("created", at > System.currentTimeMillis() && AlarmStore.clockBackup(getContext(), at, call.getString("label", "Secours")));
+        call.resolve(r);
+    }
+
+    @PluginMethod
     public void addLog(PluginCall call) {
         AlarmStore.log(getContext(), call.getString("msg", ""));
         call.resolve();

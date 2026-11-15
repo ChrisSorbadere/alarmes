@@ -372,3 +372,45 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .cfdates .note { width: 100%; }
 .chip.del { background: #fee2e2; border-color: #f87171; color: #991b1b; text-decoration: line-through; }
 .cfg { margin-top: 10px; }
+
+/* ---------- Carte « Aujourd'hui » ---------- */
+.today { padding: 14px; margin-bottom: 14px; background: linear-gradient(160deg, #1e293b, #0f172a); color: #f1f5f9; border-color: transparent; }
+.today .tnext { cursor: pointer; }
+.today .tlabel { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; opacity: .75; }
+.today .tmain { display: flex; align-items: baseline; gap: 12px; margin-top: 2px; }
+.today .ttime { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.today .ttitle { font-size: 17px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.today .tsub { font-size: 13px; opacity: .75; }
+.today .tline { display: flex; gap: 8px; overflow-x: auto; margin: 12px -14px 0; padding: 0 14px 2px; scrollbar-width: none; }
+.today .tline::-webkit-scrollbar { display: none; }
+.today .tdot { flex: none; max-width: 150px; text-align: left; border: 0; border-left: 4px solid var(--c, #64748b); border-radius: 10px; background: rgba(255,255,255,.1); color: inherit; padding: 6px 10px; }
+.today .tdot b { display: block; font-variant-numeric: tabular-nums; }
+.today .tdot span { display: block; font-size: 12px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.today .tdot.past { opacity: .45; }
+.today .tmore { flex: none; align-self: center; font-size: 12px; opacity: .7; }
+.today .tpause { margin-top: 12px; padding: 8px 10px; border-radius: 10px; background: rgba(251,191,36,.18); font-size: 14px; }
+.today .tpause .btn { margin: 6px 6px 0 0; }
+.today .tfoot { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.today .btn { background: rgba(255,255,255,.14); color: inherit; border: 0; flex: none; }
+.health { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; border: 0; background: none; color: inherit; font-size: 13px; text-align: left; padding: 4px 0; }
+.health i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.25); }
+.health.warn i { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,.25); }
+.health.bad i { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.3); }
+
+/* ---------- Groupes d'alarmes semblables ---------- */
+.alarmgrp { position: relative; display: flex; align-items: center; gap: 12px; overflow: hidden; cursor: pointer; padding-left: 18px; box-shadow: 0 3px 0 -1px var(--line), 0 6px 0 -2px var(--line); margin-bottom: 14px; }
+.alarmgrp::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: var(--c, #64748b); }
+.alarmgrp .time { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 62px; }
+.alarmgrp .info { flex: 1; min-width: 0; }
+.alarmgrp .title { font-weight: 600; }
+.alarmgrp .sub { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gcount { flex: none; background: var(--soft); border-radius: 99px; padding: 4px 10px; font-weight: 600; font-size: 14px; }
+.gcount i { font-style: normal; font-size: 10px; margin-left: 6px; opacity: .6; }
+.alarmgrp.open { box-shadow: none; margin-bottom: 8px; }
+.grpbody { margin: 0 0 14px 14px; padding-left: 10px; border-left: 2px solid var(--line); }
+
+.nlbox { display: flex; gap: 8px; margin-top: 10px; }
+.nlbox input { flex: 1; min-width: 0; }
+.backupbox { margin-top: 12px; }
+.backupbox .row { align-items: center; }
+.row > .switch { flex: none; }

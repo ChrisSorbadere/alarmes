@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.20.0';
+const VERSION = '1.21.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -107,6 +107,7 @@ const S = {
   tab: 'list',
   search: '',
   selMode: false,
+  openGroups: new Set(),
   sel: new Set(),
   visibleIds: [],
   listFilter: 'all',
@@ -226,12 +227,55 @@ function relPreview(a) {
   return WD_ORDER.filter(w => by[w]).map(w => `${JOURS[w].slice(0, 3)} ${[...by[w]].join(' ou ')}`).join(' | ');
 }
 
+/* ---------- Pause (vacances, maladie) ---------- */
+// S.settings.pause = { from:'YYYY-MM-DD', until:'YYYY-MM-DD', scopes:[{kind:'all'}|{kind:'cal',id}|{kind:'src',name}] }
+function activePause() {
+  const p = S.settings && S.settings.pause;
+  return p && p.until && p.until >= ymd(today0()) ? p : null;
+}
+function inPauseScope(a, p) {
+  return (p.scopes || [{ kind: 'all' }]).some(sc =>
+    sc.kind === 'all'
+    || (sc.kind === 'cal' && a.schedule.type === 'weekly' && a.schedule.schoolOnly && calIdsOf(a.schedule).includes(sc.id))
+    || (sc.kind === 'src' && a.source && a.source.name === sc.name));
+}
+function pausedOn(a, ds) {
+  const p = activePause();
+  return !!p && ds >= p.from && ds <= p.until && inPauseScope(a, p);
+}
+function pauseLabel(p) {
+  const sc = p.scopes || [{ kind: 'all' }];
+  const what = sc.some(x => x.kind === 'all') ? 'toutes les alarmes'
+    : sc.map(x => x.kind === 'cal' ? (calById(x.id) ? '« ' + calById(x.id).name + ' »' : 'calendrier') : '« ' + x.name + ' »').join(', ');
+  return `${what} jusqu’au ${fmtShort(parseYmd(p.until))} inclus`;
+}
+
+/* ---------- Icône automatique d'après le titre ---------- */
+const ICONS = [
+  [/\b(debout|lever|reveil|se lever)/, '🌅'], [/\b(casier|dossier)/, '🗂️'], [/\b(usb|cle|docs?)\b/, '💾'],
+  [/\b(sandwich|repas|dejeuner|diner|manger|cuisine)/, '🥪'], [/\b(copies|corriger|correction|notes|bulletin)/, '📝'],
+  [/\b(partir|lycee|cours|classe|college|ecole)/, '🏫'], [/\b(appeler|telephoner|rappeler)/, '📞'],
+  [/\b(rdv|rendez|medecin|dentiste|docteur)/, '🩺'], [/\b(medicament|cachet|pilule)/, '💊'],
+  [/\b(poubelle)/, '🗑️'], [/\b(courses|acheter|supermarche)/, '🛒'], [/\b(sport|courir|gym|piscine)/, '🏃'],
+  [/\b(anniversaire)/, '🎂'], [/\b(train|avion|bus|vol|gare|aeroport)/, '🚆'], [/\b(reunion|conseil|rencontre)/, '👥'],
+  [/\b(payer|facture|impot|loyer|banque)/, '💶'], [/\b(dire|prevenir|annoncer)/, '💬'],
+];
+function iconOf(a) {
+  const t = (a.title || '').trim();
+  if (!t || /^[\p{Extended_Pictographic}\u203c\u2049]/u.test(t)) return '';
+  const n = norm(t);
+  for (const [re, ic] of ICONS) if (re.test(n)) return ic;
+  return '';
+}
+const titleOf = a => { const ic = iconOf(a); return (ic ? ic + ' ' : '') + (a.title || 'Sans titre'); };
+
 /** Occurrences (objets Date) entre from et to inclus. */
 function occurrences(a, from, to, limit = 1000) {
   const out = [];
   const sc = a.schedule;
   if (sc.type === 'dates') {
     for (const s of [...sc.dates].sort()) {
+      if (pausedOn(a, s)) continue;
       const d = atTime(s, a.time);
       if (d >= from && d <= to) out.push(d);
       if (out.length >= limit) break;
@@ -241,7 +285,7 @@ function occurrences(a, from, to, limit = 1000) {
   let d = new Date(from); d.setHours(0, 0, 0, 0);
   const end = new Date(to);
   for (let i = 0; i < 3700 && d <= end && out.length < limit; i++) {
-    if (dayRings(sc, d)) {
+    if (dayRings(sc, d) && !pausedOn(a, ymd(d))) {
       for (const hm of ringTimes(a, ymd(d))) {
         const t = atTime(ymd(d), hm);
         if (t >= from && t <= to) out.push(t);
@@ -418,6 +462,7 @@ function nativePayload() {
         repeats: effRing(a).repeats,
         fadeSec: effRing(a).fadeSec,
         maxVol: effRing(a).maxVol,
+        speak: !!S.settings.speak,
         ringIndex: 0,
       });
     }
@@ -533,6 +578,23 @@ async function openJournal() {
     if (b.dataset.jr === 'clear' && confirm('Effacer le journal ?')) { await Native.clearLog(); $('#sheet').onclick = null; closeSheet(); toast('Journal effacé'); }
   };
   showSheet();
+}
+
+/** Alarme de secours : copie la prochaine sonnerie (moins de 24 h) dans l'Horloge du téléphone. */
+async function syncBackup() {
+  if (!Native || !Native.clockBackup) return;
+  const now = Date.now(), delay = Number(S.settings.backupDelay ?? 5);
+  for (const a of S.alarms) {
+    if (!a.backup || !a.enabled || a.mode === 'notif') continue;
+    const n = nextOcc(a);
+    if (!n) continue;
+    const at = n.getTime() + delay * 60000;
+    if (at - now > 23.5 * 3600000 || at - now < 3 * 60000) continue;
+    try {
+      const r = await Native.clockBackup({ at, label: 'Secours · ' + (a.title || 'Alarme') });
+      if (r && r.created) toast(`🛟 Secours créé dans l’Horloge pour ${fmtTime(new Date(at))}`, 3500);
+    } catch (e) { /* ignore */ }
+  }
 }
 
 async function syncNative() {
@@ -671,13 +733,14 @@ function alarmCard(a, when) {
     a.event ? (a.event.missing ? '⚠️📅' : '📅') : '',
     a.mode === 'notif' ? '🔕' : '',
   ].join('');
-  const sub = when ? `${capital(relDay(when))} · ${scheduleSummary(a)}` : scheduleSummary(a);
+  const rec = a.schedule.type !== 'dates' ? '↻ ' : '';
+  const sub = rec + (when ? `${capital(relDay(when))} · ${scheduleSummary(a)}` : scheduleSummary(a));
   const picking = S.selMode && (S.tab === 'list' || S.tab === 'calendar');
   const picked = picking && S.sel.has(a.id);
   return `<div class="card alarm ${a.enabled ? '' : 'off'} ${picked ? 'picked' : ''}" style="--c:${colorOf(a)}" ${picking ? `data-pick="${a.id}"` : `data-open="${a.id}"`}>
       <div class="time">${esc(isRel(a) ? (when ? fmtTime(when) : '⏱') : a.time)}</div>
       <div class="info">
-        <div class="title">${esc(a.title || 'Sans titre')}</div>
+        <div class="title">${esc(titleOf(a))}</div>
         <div class="sub">${esc(sub)}</div>
         ${clips ? `<div class="clips">${clips}</div>` : ''}
       </div>
@@ -685,11 +748,131 @@ function alarmCard(a, when) {
     </div>`;
 }
 
+function groupCard(g) {
+  const first = g.items[0], a = first.a, open = S.openGroups.has(g.key);
+  const last = g.items[g.items.length - 1];
+  const span = first.n ? `${capital(relDay(first.n))}${g.items.length > 1 && last.n ? ' → ' + fmtShort(last.n) : ''}` : 'Terminées';
+  return `<div class="card alarmgrp ${open ? 'open' : ''}" style="--c:${colorOf(a)}" data-grp="${esc(g.key)}">
+      <div class="time">${esc(a.time)}</div>
+      <div class="info"><div class="title">${esc(titleOf(a))}</div><div class="sub">${g.items.length} dates · ${esc(span)}</div></div>
+      <span class="gcount">${g.items.length}<i>${open ? '▲' : '▼'}</i></span>
+    </div>${open ? `<div class="grpbody"><div class="chips" style="margin:0 0 8px"><button class="chip" data-grpsel="${esc(g.items.map(x => x.a.id).join(','))}">≈ Sélectionner les ${g.items.length}</button></div>${g.items.map(x => alarmCard(x.a, x.n)).join('')}</div>` : ''}`;
+}
+
 function listMatches(a) {
   const w = norm(S.search).trim();
   return !w || norm(a.title + ' ' + a.description + ' ' + (a.source ? a.source.name : '')).includes(w);
 }
 
+/* ---------- Carte « Aujourd'hui » : prochaine sonnerie, frise du jour, voyant de santé ---------- */
+function countdown(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return 'dans moins d’une minute';
+  if (m < 60) return `dans ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `dans ${h} h ${pad(m % 60)}`;
+  const d = Math.floor(h / 24);
+  return `dans ${d} jour${d > 1 ? 's' : ''}${h % 24 ? ' ' + (h % 24) + ' h' : ''}`;
+}
+function healthInfo() {
+  const m = S.missed || [];
+  if (m.length || S.lost) return { lvl: 'bad', txt: m.length ? `${m.length} alarme${m.length > 1 ? 's' : ''} manquée${m.length > 1 ? 's' : ''}` : 'Alarmes effacées par le système, reprogrammées' };
+  if (!isNative) return { lvl: 'warn', txt: 'Mode navigateur : sonne seulement page ouverte' };
+  const st = S.sys;
+  if (st) {
+    const ko = [[st.notifications, 'notifications'], [st.exact, 'heure exacte'], [st.overlay, 'affichage par-dessus'], [st.fullScreen, 'écran plein'], [st.batteryFree, 'économie de batterie'], [st.bgFree !== false, 'arrière-plan']].filter(x => !x[0]).map(x => x[1]);
+    if (ko.length) return { lvl: 'warn', txt: 'À régler : ' + ko.join(', ') };
+  }
+  if (!lastSync.count) return { lvl: 'ok', txt: 'Aucune sonnerie à programmer' };
+  return { lvl: 'ok', txt: `${lastSync.count} sonnerie${lastSync.count > 1 ? 's' : ''} programmée${lastSync.count > 1 ? 's' : ''} jusqu’au ${fmtShort(lastSync.until)}` };
+}
+function todayCardHTML() {
+  const now = new Date();
+  const t0 = today0(), t1 = new Date(t0.getTime() + 86400000 - 1);
+  const day = [];
+  let next = null;
+  for (const a of S.alarms) {
+    if (!a.enabled) continue;
+    for (const d of occurrences(a, t0, t1, 20)) day.push({ a, d });
+    const n = nextOcc(a, now);
+    if (n && (!next || n < next.d)) next = { a, d: n };
+  }
+  day.sort((x, y) => x.d - y.d);
+  const h = healthInfo(), p = activePause();
+  const shown = day.length > 9 ? day.filter(x => x.d >= now).slice(0, 9) : day;
+  return `<div class="card today" id="todayCard">
+    <div class="tnext" ${next ? `data-open="${next.a.id}"` : ''}>
+      ${next ? `<div class="tlabel">Prochaine sonnerie · ${countdown(next.d - now)}</div>
+        <div class="tmain"><span class="ttime">${fmtTime(next.d)}</span><span class="ttitle">${esc(titleOf(next.a))}</span></div>
+        <div class="tsub">${capital(relDay(next.d))}</div>`
+      : `<div class="tlabel">Prochaine sonnerie</div><div class="tmain"><span class="ttitle">Aucune alarme à venir</span></div>`}
+    </div>
+    ${day.length ? `<div class="tline">${shown.map(x => `<button class="tdot ${x.d < now ? 'past' : ''}" style="--c:${colorOf(x.a)}" data-open="${x.a.id}"><b>${fmtTime(x.d)}</b><span>${esc(titleOf(x.a))}</span></button>`).join('')}${shown.length < day.length ? `<span class="tmore">${day.length - shown.length} déjà passée${day.length - shown.length > 1 ? 's' : ''}</span>` : ''}</div>` : `<div class="note" style="margin:8px 0 0">Rien d’autre aujourd’hui.</div>`}
+    ${p ? `<div class="tpause">⏸ <b>En pause</b> : ${esc(pauseLabel(p))} <button class="btn small" data-pause="open">Modifier</button> <button class="btn small" data-pause="stop">Reprendre</button></div>` : ''}
+    <div class="tfoot">
+      <button class="health ${h.lvl}" data-gohealth="1"><i></i>${esc(h.txt)}</button>
+      ${p ? '' : '<button class="btn small" data-pause="open">⏸ Pause</button>'}
+    </div>
+  </div>`;
+}
+function updateToday() {
+  const el = $('#todayCard');
+  if (!el || S.tab !== 'list' || document.hidden) return;
+  el.outerHTML = todayCardHTML();
+}
+
+function openPause(draft) {
+  ED = null; BE = null; DP = null; CF = null;
+  const cur = activePause();
+  const st = draft || (cur ? clone(cur) : { from: ymd(today0()), until: ymd(addDays(today0(), 6)), scopes: [{ kind: 'all' }] });
+  const redraw = () => { const y = $('#sheet').scrollTop; openPause(st); $('#sheet').scrollTop = y; };
+  const srcs = [...new Set(S.alarms.filter(a => a.source).map(a => a.source.name))];
+  const has = sc => st.scopes.some(x => x.kind === sc.kind && x.id === sc.id && x.name === sc.name);
+  const chip = (sc, label) => `<button class="chip ${has(sc) ? 'on' : ''}" data-psc='${esc(JSON.stringify(sc))}'>${esc(label)}</button>`;
+  const n = S.alarms.filter(a => a.enabled && inPauseScope(a, st)).length;
+  $('#sheet').innerHTML = `
+  <div class="sheet-head"><button data-pz="close">✕</button><h3>Mettre en pause</h3><button class="save" data-pz="save">Valider</button></div>
+  <div class="sheet-body">
+    <p class="note" style="margin-top:0">Vacances, maladie, grève : les alarmes choisies ne sonnent pas jusqu’à la date indiquée, puis reprennent toutes seules. Rien n’est supprimé.</p>
+    <label class="f">Jusqu’au (inclus)</label>
+    <input type="date" id="pzUntil" value="${st.until}" min="${ymd(today0())}">
+    <div class="chips" style="margin-top:8px">
+      <button class="chip" data-pzd="0">Aujourd’hui seulement</button>
+      <button class="chip" data-pzd="1">Jusqu’à demain</button>
+      <button class="chip" data-pzd="6">1 semaine</button>
+      <button class="chip" data-pzd="13">2 semaines</button>
+    </div>
+    <label class="f">Quelles alarmes ?</label>
+    <div class="chips">
+      ${chip({ kind: 'all' }, 'Toutes')}
+      ${(S.cals || []).map(c => chip({ kind: 'cal', id: c.id }, 'Calendrier : ' + c.name)).join('')}
+      ${srcs.map(nm => chip({ kind: 'src', name: nm }, 'Import : ' + nm)).join('')}
+    </div>
+    <p class="note"><b>${n}</b> alarme${n > 1 ? 's' : ''} concernée${n > 1 ? 's' : ''}. Tu peux cocher plusieurs groupes (ex. ton calendrier + l’import du lycée) et garder le reste actif.</p>
+    ${cur ? '<div class="btns"><button class="btn danger" data-pz="stop">Arrêter la pause maintenant</button></div>' : ''}
+  </div>`;
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const g = $('#pzUntil'); if (g && g.value) st.until = g.value;
+    if (b.dataset.pzd !== undefined) { st.until = ymd(addDays(today0(), Number(b.dataset.pzd))); redraw(); return; }
+    if (b.dataset.psc) {
+      const sc = JSON.parse(b.dataset.psc);
+      if (sc.kind === 'all') st.scopes = [{ kind: 'all' }];
+      else {
+        st.scopes = st.scopes.filter(x => x.kind !== 'all');
+        const i = st.scopes.findIndex(x => x.kind === sc.kind && x.id === sc.id && x.name === sc.name);
+        if (i >= 0) st.scopes.splice(i, 1); else st.scopes.push(sc);
+        if (!st.scopes.length) st.scopes = [{ kind: 'all' }];
+      }
+      redraw(); return;
+    }
+    const done = async msg => { $('#sheet').onclick = null; closeSheet(); await saveSettings(); render(); toast(msg, 3500); };
+    if (b.dataset.pz === 'close') { $('#sheet').onclick = null; closeSheet(); }
+    if (b.dataset.pz === 'stop') { delete S.settings.pause; await done('Pause arrêtée : les alarmes sonnent à nouveau'); }
+    if (b.dataset.pz === 'save') { S.settings.pause = st; await done('⏸ En pause : ' + pauseLabel(st)); }
+  };
+  showSheet();
+}
 function renderList(v) {
   if (!S.alarms.length) {
     S.selMode = false; S.sel.clear();
@@ -737,6 +920,8 @@ function renderListBody() {
       ${hasImport ? `<button class="chip ${S.listFilter === 'manual' ? 'on' : ''}" data-filter="manual">Manuelles</button>
       <button class="chip ${S.listFilter === 'import' ? 'on' : ''}" data-filter="import">Importées</button>` : ''}
     </div>`;
+  const plain = !S.selMode && !S.search.trim();
+  if (plain) html = todayCardHTML() + html;
   if (((S.missed && S.missed.length) || S.lost) && !S.selMode) {
     const m = S.missed || [];
     html += `<div class="card banner danger">⚠️ <b>${m.length ? (m.length > 1 ? m.length + ' alarmes manquées' : 'Alarme manquée') : 'Alarmes effacées par le système'}</b>
@@ -759,9 +944,24 @@ function renderListBody() {
     if (!arr.length) continue;
     any = true;
     arr.sort((x, y) => (x.n || lastOcc(x.a) || 0) - (y.n || lastOcc(y.a) || 0));
-    const shown = name === 'Plus tard' && arr.length > 60 ? arr.slice(0, 60) : arr;
-    html += `<h2>${name} · ${arr.length}</h2>` + shown.map(x => alarmCard(x.a, x.n)).join('');
-    if (shown.length < arr.length) html += `<p class="note">… et ${arr.length - shown.length} autres (voir le calendrier).</p>`;
+    // Alarmes semblables (même titre, même heure, dates isolées) : une seule carte à déplier
+    let units = arr.map(x => ({ x }));
+    if (plain) {
+      const by = new Map();
+      for (const x of arr) if (x.a.schedule.type === 'dates') { const k = simKey(x.a); by.set(k, (by.get(k) || 0) + 1); }
+      const seen = new Map();
+      units = [];
+      for (const x of arr) {
+        const k = x.a.schedule.type === 'dates' ? simKey(x.a) : null;
+        if (!k || by.get(k) < 3) { units.push({ x }); continue; }
+        if (seen.has(k)) { seen.get(k).items.push(x); continue; }
+        const g = { key: name + '|' + k, items: [x] };
+        seen.set(k, g); units.push({ g });
+      }
+    }
+    const max = name === 'Plus tard' ? 60 : 9999;
+    html += `<h2>${name} · ${arr.length}</h2>` + units.slice(0, max).map(u => u.g ? groupCard(u.g) : alarmCard(u.x.a, u.x.n)).join('');
+    if (units.length > max) html += `<p class="note">… et ${units.length - max} autres (voir le calendrier).</p>`;
   }
   if (!any) html += `<div class="empty">${S.search.trim() ? 'Aucune alarme ne contient ce mot.' : 'Rien dans ce filtre.'}</div>`;
   body.innerHTML = html;
@@ -1847,6 +2047,77 @@ function renderCalendarTab(v) {
   updateSelBar();
 }
 
+/* ---------- Saisie en une phrase ---------- */
+function parseNatural(text, now = new Date()) {
+  let s = ' ' + (text || '').replace(/\s+/g, ' ').trim() + ' ';
+  if (s.trim().length < 2) return null;
+  const A = 'a-zA-ZÀ-ÿ';
+  const cut = re => { const m = s.match(re); if (m) s = s.replace(m[0], ' '); return m; };
+  const WD = { dimanche: 0, lundi: 1, mardi: 2, mercredi: 3, jeudi: 4, vendredi: 5, samedi: 6 };
+  const wdRe = '(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)s?';
+  const MO = ['janv', 'fevr', 'mars', 'avr', 'mai', 'juin', 'juil', 'aout', 'sept', 'oct', 'nov', 'dec'];
+  let time = null, date = null, sched = null, found = false, m;
+
+  // dans 20 min / dans 2 heures
+  if ((m = cut(/\bdans\s+(\d+)\s*(min(?:utes?)?|mn|h(?:eures?)?)\b/i))) {
+    const d = new Date(now.getTime() + Number(m[1]) * (/^h/i.test(m[2]) ? 3600000 : 60000));
+    time = fmtTime(d); date = ymd(d); found = true;
+  }
+  // heure
+  if (!time && (m = cut(/(?:(?<=\s)(?:à|a|vers|pour)\s+)?\b(\d{1,2})\s*(?:h|:|heures?)\s*(\d{2})?\b(?:\s*(?:du\s+)?(matin|soir|apr[eè]s-midi))?/i))) {
+    let h = Number(m[1]); const mi = m[2] ? Number(m[2]) : 0;
+    if (m[3] && /soir|apr/i.test(m[3]) && h < 12) h += 12;
+    if (h < 24 && mi < 60) { time = `${pad(h)}:${pad(mi)}`; found = true; }
+  }
+  if (!time && cut(/(?:(?<=\s)à\s+)?\bmidi\b/i)) { time = '12:00'; found = true; }
+  if (!time && cut(/(?:(?<=\s)à\s+)?\bminuit\b/i)) { time = '00:00'; found = true; }
+  // récurrences
+  if (cut(/\b(tous les jours|chaque jour|quotidien\w*)\b/i)) { sched = newSchedule('daily'); found = true; }
+  else if (cut(/\b(du lundi au vendredi|en semaine)\b/i)) { sched = newSchedule('weekly'); sched.weekdays = [1, 2, 3, 4, 5]; found = true; }
+  else if ((m = cut(new RegExp('\\b(?:tous les|toutes les|chaque|les)\\s+(' + wdRe + '(?:\\s*(?:,|et)\\s*' + wdRe + ')*)', 'i')))) {
+    sched = newSchedule('weekly');
+    sched.weekdays = [...new Set((norm(m[1]).match(/lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche/g) || []).map(x => WD[x]))];
+    found = true;
+  }
+  // dates
+  if (!sched && !date) {
+    if (cut(/\bapr[eè]s[- ]demain\b/i)) date = ymd(addDays(today0(), 2));
+    else if (cut(/\bdemain\b/i)) date = ymd(addDays(today0(), 1));
+    else if (cut(/\b(aujourd['’]?hui|ce soir|ce matin|cet apr[eè]s-midi)\b/i)) date = ymd(today0());
+    else if ((m = cut(/\b(?:le\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) {
+      let y = m[3] ? Number(m[3]) : now.getFullYear(); if (y < 100) y += 2000;
+      let d = new Date(y, Number(m[2]) - 1, Number(m[1]));
+      if (!m[3] && d < today0()) d = new Date(y + 1, Number(m[2]) - 1, Number(m[1]));
+      date = ymd(d);
+    } else if ((m = cut(new RegExp('\\b(?:le\\s+)?(\\d{1,2})(?:er)?\\s+(janv\\w*|f[ée]vr\\w*|mars|avr\\w*|mai|juin|juil\\w*|ao[uû]t|sept\\w*|oct\\w*|nov\\w*|d[ée]c\\w*)\\b', 'i')))) {
+      const mo = MO.findIndex(x => norm(m[2]).startsWith(x));
+      let d = new Date(now.getFullYear(), mo, Number(m[1]));
+      if (d < today0()) d = new Date(now.getFullYear() + 1, mo, Number(m[1]));
+      date = ymd(d);
+    } else if ((m = cut(new RegExp('\\b' + wdRe + '(\\s+prochain)?\\b', 'i')))) {
+      const w = WD[norm(m[1])];
+      let add = (w - now.getDay() + 7) % 7;
+      if (add === 0 && (m[2] || !time || atTime(ymd(today0()), time) <= now)) add = 7;
+      date = ymd(addDays(today0(), add));
+    } else if ((m = cut(/\ble\s+(\d{1,2})(?:er)?\b/i))) {
+      let d = new Date(now.getFullYear(), now.getMonth(), Number(m[1]));
+      if (d < today0()) d = new Date(now.getFullYear(), now.getMonth() + 1, Number(m[1]));
+      date = ymd(d);
+    }
+    if (date) found = true;
+  }
+  if (!found) return null;
+  if (!sched) {
+    sched = newSchedule('dates');
+    if (!date) date = ymd(time && atTime(ymd(today0()), time) <= now ? addDays(today0(), 1) : today0());
+    sched.dates = [date];
+  }
+  let title = s.replace(/\s+/g, ' ').trim().replace(/^(?:[,;:.\-–]\s*|(?:à|a|le|la|de|pour|et)\s+)+/i, '').replace(/[\s,;:\-–]+$/, '').trim();
+  title = title.replace(/^(?:de |d['’])/i, '');
+  if (title) title = title[0].toUpperCase() + title.slice(1);
+  return { title, time, schedule: sched };
+}
+
 /* ---------- Éditeur ---------- */
 let ED = null; // alarme en cours d'édition
 
@@ -1917,6 +2188,7 @@ function renderEditor() {
   </div>
   <div class="sheet-body">
     ${a._isNew ? `<button class="quickswitch" data-ed="quick">⚡ <b>Alarme rapide</b><span>aujourd’hui, en deux touchers</span></button>
+    <div class="nlbox"><input type="text" id="edNl" placeholder="En une phrase : « mardi 8h rendre les copies 5B »" autocomplete="off" enterkeyhint="done"><button class="btn small primary" data-ed="nl">Remplir</button></div>
     <div class="tpls"><div class="note" style="margin:0 0 6px">Modèles (l’appli remplit tout, tu n’as plus qu’à vérifier) :</div>
       <button class="chip" data-tpl="lever">🌅 Se lever les jours de travail</button>
       <button class="chip" data-tpl="cours">🏫 Avant mes cours</button></div>` : ''}
@@ -2291,6 +2563,19 @@ async function editorAction(act, el) {
       return;
     case 'preview': togglePreview(effRing(ED).sound); return;
     case 'quick': closeSheet(); openQuick(); return;
+    case 'nl': {
+      const txt = ($('#edNl') || {}).value || '';
+      const r = parseNatural(txt);
+      if (!r) { toast('Je n’ai pas compris. Exemple : « demain 7h30 sortir la poubelle »', 4000); return; }
+      if (r.title) ED.title = r.title;
+      if (r.time) ED.time = r.time;
+      if (r.schedule) ED.schedule = r.schedule;
+      { const d0 = r.schedule && r.schedule.dates && r.schedule.dates[0] ? parseYmd(r.schedule.dates[0]) : new Date(); ED._calMonth = new Date(d0.getFullYear(), d0.getMonth(), 1); }
+      renderEditor();
+      const n = nextOcc(ED);
+      toast(`Compris : « ${ED.title || 'Alarme'} » · ${scheduleSummary(ED)}${n ? ' · ' + relDay(n) + ' à ' + fmtTime(n) : ''}. Vérifie puis Enregistrer.`, 5000);
+      return;
+    }
     case 'photo': $('#edPhotoInput').click(); return;
     case 'library':
       openPhotoPicker(list => {
@@ -2356,6 +2641,24 @@ function bindSheet() {
           S.selMode = true; S.sel.clear(); for (const b of similarOf(a)) S.sel.add(b.id);
           if (S.tab !== 'list' && S.tab !== 'calendar') go('list'); else refreshView();
           toast(`${S.sel.size} alarmes sélectionnées`);
+        }
+        if (act === 'skip' || act === 'unskip') {
+          const a = S.alarms.find(x => x.id === d.dataset.id);
+          if (!a) return;
+          const sc = a.schedule;
+          let day;
+          if (act === 'skip') {
+            const n = nextOcc(a); if (!n) return;
+            day = ymd(n);
+            sc.except = [...new Set([...(sc.except || []), day])];
+            sc.extra = (sc.extra || []).filter(x => x !== day);
+          } else { day = d.dataset.day; sc.except = (sc.except || []).filter(x => x !== day); }
+          a.updatedAt = Date.now();
+          await saveAlarms();
+          const y = $('#sheet').scrollTop; openDetail(a.id); $('#sheet').scrollTop = y;
+          refreshView();
+          toast(act === 'skip' ? `Sautée : ${fmtShort(parseYmd(day))}. Les suivantes sonnent normalement.` : `Rétablie : ${fmtShort(parseYmd(day))}`, 3500);
+          return;
         }
         if (act === 'openevent') {
           const a = S.alarms.find(x => x.id === d.dataset.id);
@@ -2495,6 +2798,11 @@ function bindSheet() {
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
   });
   s.addEventListener('change', async e => {
+    if (e.target.dataset && e.target.dataset.dtbackup) {
+      const a = S.alarms.find(x => x.id === e.target.dataset.dtbackup);
+      if (a) { a.backup = e.target.checked; a.updatedAt = Date.now(); await saveAlarms(); toast(a.backup ? '🛟 Secours activé : créé à l’ouverture de l’appli, dans les 24 h avant la sonnerie' : 'Secours désactivé', 4500); if (a.backup) syncBackup(); }
+      return;
+    }
     if (ED && e.target.id === 'edSchoolFile' && e.target.files[0]) {
       readEditorFields();
       await importCalFile(e.target.files[0]);
@@ -2554,6 +2862,10 @@ function openDetail(id) {
       <div class="attach"><span>📅</span><div class="t"><b>${esc(a.event.title || 'Événement')}</b><small>${esc(eventLabel(a.event))}${a.event.missing ? ' · introuvable' : ''}</small></div>
       ${isNative ? `<button class="btn small" data-dt="openevent" data-id="${a.id}">Ouvrir</button>` : ''}</div>` : ''}
     ${similarOf(a).length > 1 ? `<div class="btns"><button class="btn" data-dt="similar" data-id="${a.id}">≈ Sélectionner les ${similarOf(a).length} semblables</button></div><p class="note" style="margin-top:4px">Même titre et même heure : pour les modifier ou supprimer toutes, ou en choisir certaines dans un calendrier.</p>` : ''}
+    ${a.enabled && a.schedule.type !== 'dates' && nx.length ? `<div class="btns"><button class="btn" data-dt="skip" data-id="${a.id}">⏭ Sauter la prochaine (${esc(relDay(nx[0]))})</button></div>` : ''}
+    ${a.schedule.type !== 'dates' && (a.schedule.except || []).some(d => d >= ymd(today0())) ? `<p class="note" style="margin:8px 0 4px">Jours sautés (touche pour rétablir) :</p><div class="chips">${a.schedule.except.filter(d => d >= ymd(today0())).sort().map(d => `<button class="chip del" data-dt="unskip" data-id="${a.id}" data-day="${d}">${fmtShort(parseYmd(d))} ✕</button>`).join('')}</div>` : ''}
+    ${isNative && a.mode !== 'notif' ? `<div class="card backupbox"><div class="row"><div><b>🛟 Alarme de secours</b><div class="note" style="margin:0">Copie dans l’Horloge du téléphone, ${Number(S.settings.backupDelay ?? 5)} min après, au cas où le système arrêterait l’appli. Expérimental.</div></div>
+      <label class="switch"><input type="checkbox" data-dtbackup="${a.id}" ${a.backup ? 'checked' : ''}><span></span></label></div></div>` : ''}
     <label class="f">Prochaines sonneries</label>
     ${nx.length ? `<div class="card occ">${nx.map(d => `<div>${capital(relDay(d))} ${fmtTime(d)}</div>`).join('')}</div>` : `<p class="note">${a.enabled ? 'Aucune sonnerie à venir.' : 'Alarme désactivée.'}</p>`}
   </div>`;
@@ -3179,6 +3491,8 @@ async function renderSettings(v) {
       </div>
       ${fadeControlsHTML('setFade', 'setMax', Number(S.settings.fadeSec || 0), S.settings.maxVol ? '1' : '0', 'settings')}
       <p class="note">« Volume progressif » : le son démarre très bas et monte jusqu’au volume d’alarme du téléphone. « Finir au volume max » pousse ce volume au maximum le temps de la sonnerie, puis le remet comme avant.</p>
+      <div class="row" style="margin-top:10px"><div><b>🗣 Annonce vocale</b><div class="note" style="margin:0">Le téléphone dit le titre de l’alarme pendant la sonnerie.</div></div>
+        <label class="switch"><input type="checkbox" id="setSpeak" ${S.settings.speak ? 'checked' : ''}><span></span></label></div>
       <label class="f">Intervalle (snooze et répétitions)</label>
       <select id="setSnooze">${[5, 10, 15, 20, 30, 60].map(n => `<option value="${n}" ${Number(S.settings.snoozeMin) === n ? 'selected' : ''}>${n} minutes</option>`).join('')}</select>
       <p class="note">Sans réponse, l’alarme sonne pendant la durée choisie, s’arrête, puis resonne après l’intervalle, autant de fois que prévu. Chaque alarme peut avoir ses propres réglages.</p>
@@ -3324,6 +3638,7 @@ function bindSettings() {
     }
     if (e.target.id === 'restoreFile' && e.target.files[0]) { await doRestore(e.target.files[0], S.restoreMode || 'merge'); return; }
     if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
+    if (e.target.id === 'setSpeak') { S.settings.speak = e.target.checked; await saveSettings(); toast('Annonce vocale : ' + (S.settings.speak ? 'activée' : 'désactivée')); }
     if (e.target.id === 'setFade') { S.settings.fadeSec = Number(e.target.value); await saveSettings(); toast('Volume progressif : ' + fadeLabel(e.target.value).toLowerCase()); }
     if (e.target.id === 'setMax') { S.settings.maxVol = e.target.value === '1'; await saveSettings(); toast('Finir au volume max : ' + (S.settings.maxVol ? 'oui' : 'non')); }
     if (e.target.id === 'setRep') { S.settings.repeats = Number(e.target.value); await saveSettings(); toast('Répétitions : ' + repLabel(Number(e.target.value))); }
@@ -3449,6 +3764,17 @@ function bindMain() {
       return;
     }
     if (e.target.closest('[data-stop]')) return;
+    const pz = e.target.closest('[data-pause]');
+    if (pz) {
+      if (pz.dataset.pause === 'stop') { delete S.settings.pause; await saveSettings(); render(); toast('Pause arrêtée : les alarmes sonnent à nouveau'); }
+      else openPause();
+      return;
+    }
+    if (e.target.closest('[data-gohealth]')) { go('settings'); return; }
+    const gs = e.target.closest('[data-grpsel]');
+    if (gs) { S.selMode = true; S.sel.clear(); gs.dataset.grpsel.split(',').forEach(id => S.sel.add(id)); refreshView(); return; }
+    const gr = e.target.closest('[data-grp]');
+    if (gr) { const k = gr.dataset.grp; S.openGroups.has(k) ? S.openGroups.delete(k) : S.openGroups.add(k); refreshView(); return; }
     const f = e.target.closest('[data-filter]');
     if (f) { S.listFilter = f.dataset.filter; renderListBody(); return; }
     if (S.tab === 'calendar') {
@@ -3497,8 +3823,11 @@ async function start() {
   if (Native) {
     try {
       const st = await Native.status();
+      S.sys = st;
       if (!st.notifications) await Native.requestNotifications();
     } catch (e) { /* ignore */ }
+    updateToday();
+    syncBackup();
     try { const r = await Native.getLaunchAlarm(); if (r && r.alarmId) handleOpenAlarm(r.alarmId); } catch (e) { /* ignore */ }
     Native.addListener('openAlarm', r => handleOpenAlarm(r.alarmId));
     document.addEventListener('visibilitychange', async () => {
@@ -3506,12 +3835,15 @@ async function start() {
       try { await checkHealth(); } catch (e) { /* ignore */ }
       try { await syncEvents(); } catch (e) { /* ignore */ }
       await syncNative();
+      try { S.sys = await Native.status(); } catch (e) { /* ignore */ }
+      syncBackup();
       if (S.tab !== 'import' && $('#sheet').hidden) refreshView();
     });
   } else {
     setInterval(webTick, 15000);
     webTick();
   }
+  setInterval(updateToday, 30000);
   // Retour Android : ferme la feuille ouverte au lieu de quitter
   window.addEventListener('popstate', () => { if (!$('#sheet').hidden) closeSheet(true); });
 }

@@ -108,6 +108,7 @@ public class AlarmService extends Service {
             startSound(a.optString("soundUri", ""), fadeSec, otherAudio);
             AlarmStore.log(this, "Sonnerie lancée" + (player == null ? " (ERREUR : aucun son lisible)" : "")
                 + (otherAudio ? " · autre son en cours (mis en pause)" : ""));
+            if (a.optBoolean("speak", false)) startSpeak(a.optString("title", ""));
             if (fadeSec > 0) {
                 handler.removeCallbacks(vibrateTask);
                 handler.postDelayed(vibrateTask, fadeSec * 500L);
@@ -136,11 +137,11 @@ public class AlarmService extends Service {
         }
 
         if (ACTION_SNOOZE.equals(action)) {
-            AlarmStore.log(this, "Reportée");
+            AlarmStore.log(this, "Reportée" + (intent.getIntExtra("minutes", 0) > 0 ? " de " + intent.getIntExtra("minutes", 0) + " min" : ""));
             String j = json != null ? json : curJson;
             finishRing();
             nm.cancel(nid);
-            AlarmReceiver.snooze(this, nid, j, 0);
+            AlarmReceiver.snooze(this, nid, j, 0, intent.getIntExtra("minutes", 0));
             return START_NOT_STICKY;
         }
 
@@ -300,26 +301,102 @@ public class AlarmService extends Service {
         final MediaPlayer mp = player;
         // un autre son jouait : on part d'un niveau déjà audible
         final float floor = otherAudio ? 0.35f : 0.02f;
-        try {
-            mp.setVolume(floor, floor);
-        } catch (Exception ignored) {}
+        curVol = floor;
+        applyVolume();
         fadeTask = new Runnable() {
             @Override
             public void run() {
                 if (player != mp) return;
                 float t = Math.min(1f, (System.currentTimeMillis() - start) / (float) total);
-                float v = Math.max(floor, t * t);
-                try {
-                    mp.setVolume(v, v);
-                } catch (Exception ignored) {}
+                curVol = Math.max(floor, t * t);
+                applyVolume();
                 if (t < 1f) handler.postDelayed(this, 250);
             }
         };
         handler.postDelayed(fadeTask, 250);
     }
 
+    // ---------- Annonce vocale du titre ----------
+    private android.speech.tts.TextToSpeech tts = null;
+    private Runnable speakTask = null;
+    private float curVol = 1f;
+    private boolean ducked = false;
+
+    private void applyVolume() {
+        if (player == null) return;
+        float v = ducked ? Math.min(curVol, 0.12f) : curVol;
+        try {
+            player.setVolume(v, v);
+        } catch (Exception ignored) {}
+    }
+
+    private void startSpeak(String title) {
+        stopSpeak();
+        final String text = title == null ? "" : title.replaceAll("[^\\p{L}\\p{N}\\p{P}\\s]", " ").replaceAll("\\s+", " ").trim();
+        if (text.isEmpty()) return;
+        try {
+            tts = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> handler.post(() -> {
+                if (tts == null) return;
+                if (status != android.speech.tts.TextToSpeech.SUCCESS) {
+                    AlarmStore.log(this, "Annonce vocale indisponible sur ce téléphone");
+                    return;
+                }
+                try {
+                    tts.setLanguage(java.util.Locale.FRANCE);
+                    tts.setAudioAttributes(alarmAttributes());
+                    tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                        @Override
+                        public void onStart(String id) {
+                            handler.post(() -> { ducked = true; applyVolume(); });
+                        }
+
+                        @Override
+                        public void onDone(String id) {
+                            handler.post(() -> { ducked = false; applyVolume(); });
+                        }
+
+                        @Override
+                        public void onError(String id) {
+                            handler.post(() -> { ducked = false; applyVolume(); });
+                        }
+                    });
+                    speakTask = new Runnable() {
+                        @Override
+                        public void run() {
+                            if (tts == null) return;
+                            try {
+                                tts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "alarme");
+                            } catch (Exception ignored) {}
+                            handler.postDelayed(this, 20000);
+                        }
+                    };
+                    handler.postDelayed(speakTask, 2500);
+                } catch (Exception e) {
+                    Log.w(AlarmStore.TAG, "Annonce vocale impossible", e);
+                }
+            }));
+        } catch (Exception e) {
+            Log.w(AlarmStore.TAG, "Annonce vocale impossible", e);
+            tts = null;
+        }
+    }
+
+    private void stopSpeak() {
+        if (speakTask != null) handler.removeCallbacks(speakTask);
+        speakTask = null;
+        ducked = false;
+        if (tts != null) {
+            try {
+                tts.stop();
+                tts.shutdown();
+            } catch (Exception ignored) {}
+            tts = null;
+        }
+    }
+
     private void startSound(String soundUri) {
         stopSound();
+        curVol = 1f;
         player = createPlayer(this, soundUri, true);
         if (player != null) {
             try {
@@ -362,6 +439,7 @@ public class AlarmService extends Service {
         if (fadeTask != null) handler.removeCallbacks(fadeTask);
         fadeTask = null;
         restoreAlarmVolume();
+        stopSpeak();
         stopSound();
         abandonFocus();
         if (vibrator != null) {

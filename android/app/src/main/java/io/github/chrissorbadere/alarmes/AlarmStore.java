@@ -202,6 +202,38 @@ public final class AlarmStore {
         }
     }
 
+    /** Alarme de secours : crée une alarme dans l'Horloge du téléphone (une seule fois par horaire). */
+    static synchronized boolean clockBackup(Context c, long at, String label) {
+        try {
+            SharedPreferences p = prefs(c);
+            JSONArray done = new JSONArray(p.getString("secours", "[]"));
+            long now = System.currentTimeMillis();
+            JSONArray keep = new JSONArray();
+            for (int i = 0; i < done.length(); i++) {
+                long t = done.optLong(i);
+                if (t == at) return false;
+                if (t > now - 86400000L) keep.put(t);
+            }
+            java.util.Calendar cal = java.util.Calendar.getInstance();
+            cal.setTimeInMillis(at);
+            Intent i = new Intent(android.provider.AlarmClock.ACTION_SET_ALARM)
+                .putExtra(android.provider.AlarmClock.EXTRA_HOUR, cal.get(java.util.Calendar.HOUR_OF_DAY))
+                .putExtra(android.provider.AlarmClock.EXTRA_MINUTES, cal.get(java.util.Calendar.MINUTE))
+                .putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label)
+                .putExtra(android.provider.AlarmClock.EXTRA_VIBRATE, true)
+                .putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            c.startActivity(i);
+            keep.put(at);
+            p.edit().putString("secours", keep.toString()).apply();
+            log(c, "Secours : alarme créée dans l'Horloge du téléphone pour " + hm(at));
+            return true;
+        } catch (Exception e) {
+            log(c, "ERREUR : secours impossible dans l'Horloge (" + e.getClass().getSimpleName() + ")");
+            return false;
+        }
+    }
+
     /** État du système pour cette appli (diagnostic). */
     static String sysState(Context c) {
         StringBuilder sb = new StringBuilder();

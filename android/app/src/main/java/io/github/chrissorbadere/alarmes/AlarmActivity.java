@@ -19,10 +19,12 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -154,45 +156,92 @@ public class AlarmActivity extends Activity {
 
     private void build() {
         int color = AlarmReceiver.parseColor(data.optString("color", "#2563eb"));
-        int fg = isLight(color) ? Color.parseColor("#111111") : Color.WHITE;
-        int soft = isLight(color) ? Color.argb(40, 0, 0, 0) : Color.argb(50, 255, 255, 255);
+        String alarmId = data.optString("alarmId", "");
+        int photoCount = data.optInt("photoCount", 0);
+
+        // Fond : première photo floutée si elle existe, sinon la couleur de l'alarme
+        Bitmap bgBm = null;
+        if (photoCount > 0 && !alarmId.isEmpty()) bgBm = loadPhoto(photoFile(this, alarmId, 0), 64);
+        boolean photoBg = bgBm != null;
+        int fg = photoBg ? Color.WHITE : (isLight(color) ? Color.parseColor("#111111") : Color.WHITE);
+        int soft = photoBg ? Color.argb(56, 255, 255, 255) : (isLight(color) ? Color.argb(40, 0, 0, 0) : Color.argb(50, 255, 255, 255));
+
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackgroundColor(photoBg ? Color.BLACK : color);
+        if (photoBg) {
+            ImageView bg = new ImageView(this);
+            bg.setImageBitmap(bgBm);
+            bg.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            if (Build.VERSION.SDK_INT >= 31) {
+                try {
+                    bg.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(18), dp(18), android.graphics.Shader.TileMode.CLAMP));
+                } catch (Exception ignored) {}
+            }
+            frame.addView(bg, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            View scrim = new View(this);
+            scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[] { Color.argb(120, 0, 0, 0), Color.argb(175, 0, 0, 0), Color.argb(225, 0, 0, 0) }));
+            frame.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(color);
-        root.setPadding(dp(20), dp(40), dp(20), dp(24));
+        root.setPadding(dp(22), dp(36), dp(22), dp(20));
+        frame.addView(root, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(dp(22), dp(28) + insets.getSystemWindowInsetTop(), dp(22), dp(16) + insets.getSystemWindowInsetBottom());
+            return insets;
+        });
 
+        Date nowD = new Date();
         TextView time = new TextView(this);
-        time.setText(new SimpleDateFormat("HH:mm", Locale.FRANCE).format(new Date()));
-        time.setTextSize(TypedValue.COMPLEX_UNIT_SP, 56);
-        time.setTypeface(Typeface.DEFAULT_BOLD);
+        time.setText(new SimpleDateFormat("HH:mm", Locale.FRANCE).format(nowD));
+        time.setTextSize(TypedValue.COMPLEX_UNIT_SP, 76);
+        time.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         time.setTextColor(fg);
         time.setGravity(Gravity.CENTER_HORIZONTAL);
+        time.setIncludeFontPadding(false);
         root.addView(time);
+
+        TextView day = new TextView(this);
+        day.setText(new SimpleDateFormat("EEEE d MMMM", Locale.FRANCE).format(nowD));
+        day.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        day.setTextColor(fg);
+        day.setAlpha(0.8f);
+        day.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.addView(day);
 
         String tag = data.optString("levelLabel", "");
         if (!tag.isEmpty()) {
             TextView lvl = new TextView(this);
             lvl.setText(tag.toUpperCase(Locale.FRANCE));
-            lvl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            lvl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
             lvl.setLetterSpacing(0.15f);
-            lvl.setTextColor(fg);
-            lvl.setGravity(Gravity.CENTER_HORIZONTAL);
-            root.addView(lvl);
+            lvl.setTypeface(Typeface.DEFAULT_BOLD);
+            GradientDrawable pill = new GradientDrawable();
+            pill.setCornerRadius(dp(99));
+            pill.setColor(photoBg ? color : soft);
+            lvl.setBackground(pill);
+            lvl.setTextColor(photoBg ? (isLight(color) ? Color.parseColor("#111111") : Color.WHITE) : fg);
+            lvl.setPadding(dp(12), dp(4), dp(12), dp(4));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.gravity = Gravity.CENTER_HORIZONTAL;
+            lp.setMargins(0, dp(12), 0, 0);
+            root.addView(lvl, lp);
         }
 
         TextView title = new TextView(this);
         title.setText(data.optString("title", "Alarme"));
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(fg);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
-        title.setPadding(0, dp(12), 0, dp(12));
+        title.setMaxLines(3);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        title.setPadding(0, dp(12), 0, dp(14));
         root.addView(title);
 
         // Photos jointes
-        String alarmId = data.optString("alarmId", "");
-        int photoCount = data.optInt("photoCount", 0);
         if (photoCount > 0 && !alarmId.isEmpty()) {
             HorizontalScrollView hs = new HorizontalScrollView(this);
             hs.setHorizontalScrollBarEnabled(false);
@@ -209,7 +258,7 @@ public class AlarmActivity extends Activity {
                 iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
                 iv.setClipToOutline(true);
                 GradientDrawable bg = new GradientDrawable();
-                bg.setCornerRadius(dp(14));
+                bg.setCornerRadius(dp(18));
                 bg.setColor(soft);
                 iv.setBackground(bg);
                 int w = photoCount == 1 ? ViewGroup.LayoutParams.MATCH_PARENT : (int) (h * Math.max(0.6, Math.min(1.6, bm.getWidth() / (double) bm.getHeight())));
@@ -220,36 +269,33 @@ public class AlarmActivity extends Activity {
                 shown++;
             }
             if (shown > 0) {
+                LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h);
+                sp.setMargins(0, 0, 0, dp(12));
                 if (photoCount == 1) {
-                    root.addView(strip, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h));
+                    root.addView(strip, sp);
                 } else {
                     hs.addView(strip);
-                    root.addView(hs, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h));
+                    root.addView(hs, sp);
                 }
-                TextView hint = new TextView(this);
-                hint.setText("Touche une photo pour l'agrandir");
-                hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-                hint.setTextColor(fg);
-                hint.setAlpha(0.8f);
-                hint.setGravity(Gravity.CENTER_HORIZONTAL);
-                hint.setPadding(0, dp(4), 0, dp(10));
-                root.addView(hint);
             }
         }
 
-        ScrollView sv = new ScrollView(this);
-        GradientDrawable box = new GradientDrawable();
-        box.setColor(soft);
-        box.setCornerRadius(dp(16));
-        sv.setBackground(box);
-        TextView body = new TextView(this);
+        // Description, lisible de loin
         String txt = data.optString("body", "");
-        body.setText(txt.isEmpty() ? "(pas de description)" : txt);
-        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        body.setLineSpacing(0, 1.2f);
-        body.setTextColor(fg);
-        body.setPadding(dp(16), dp(12), dp(16), dp(12));
-        sv.addView(body);
+        ScrollView sv = new ScrollView(this);
+        if (!txt.isEmpty()) {
+            GradientDrawable box = new GradientDrawable();
+            box.setColor(soft);
+            box.setCornerRadius(dp(18));
+            sv.setBackground(box);
+            TextView body = new TextView(this);
+            body.setText(txt);
+            body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
+            body.setLineSpacing(0, 1.25f);
+            body.setTextColor(fg);
+            body.setPadding(dp(18), dp(14), dp(18), dp(14));
+            sv.addView(body);
+        }
         root.addView(sv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         // Contact et lieu
@@ -279,33 +325,57 @@ public class AlarmActivity extends Activity {
             root.addView(extra);
         }
 
+        // Reporter : durée au choix
+        TextView later = new TextView(this);
+        later.setText("Reporter de");
+        later.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        later.setTextColor(fg);
+        later.setAlpha(0.8f);
+        later.setPadding(dp(4), dp(14), 0, dp(6));
+        root.addView(later);
+
+        java.util.TreeSet<Integer> choices = new java.util.TreeSet<>(java.util.Arrays.asList(5, 10, 30, 60));
+        int def = AlarmStore.snoozeMinutes(this);
+        choices.add(def);
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(0, dp(10), 0, dp(10));
-        int btnBg = isLight(color) ? Color.parseColor("#111111") : Color.WHITE;
-        int btnFg = isLight(color) ? Color.WHITE : Color.parseColor("#111111");
-
-        Button snooze = button("Snooze " + AlarmStore.snoozeMinutes(this) + " min", soft, fg);
-        Button details = button("Détails", soft, fg);
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        half.setMargins(0, 0, dp(6), 0);
-        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        half2.setMargins(dp(6), 0, 0, 0);
-        row.addView(snooze, half);
-        row.addView(details, half2);
+        int k = 0;
+        for (int min : choices) {
+            Button sb = button(min >= 60 ? (min / 60) + " h" + (min % 60 > 0 ? " " + (min % 60) : "") : min + " min", soft, fg);
+            sb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            if (min == def) sb.setTypeface(Typeface.DEFAULT_BOLD);
+            sb.setPadding(dp(4), dp(14), dp(4), dp(14));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (k++ > 0) lp.setMargins(dp(8), 0, 0, 0);
+            final int fmin = min;
+            sb.setOnClickListener(v -> {
+                sendToService(AlarmService.ACTION_SNOOZE, fmin);
+                finish();
+            });
+            row.addView(sb, lp);
+        }
         root.addView(row);
 
+        int btnBg = photoBg ? Color.WHITE : (isLight(color) ? Color.parseColor("#111111") : Color.WHITE);
+        int btnFg = photoBg ? Color.parseColor("#111111") : (isLight(color) ? Color.WHITE : Color.parseColor("#111111"));
         Button stop = button("Arrêter", btnBg, btnFg);
-        stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         stop.setTypeface(Typeface.DEFAULT_BOLD);
-        root.addView(stop, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(68)));
+        LinearLayout.LayoutParams stopLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(76));
+        stopLp.setMargins(0, dp(12), 0, 0);
+        root.addView(stop, stopLp);
+
+        TextView details = new TextView(this);
+        details.setText("Voir les détails dans l'appli ›");
+        details.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        details.setTextColor(fg);
+        details.setAlpha(0.85f);
+        details.setGravity(Gravity.CENTER_HORIZONTAL);
+        details.setPadding(0, dp(14), 0, dp(4));
+        root.addView(details);
 
         stop.setOnClickListener(v -> {
-            sendToService(AlarmService.ACTION_STOP);
-            finish();
-        });
-        snooze.setOnClickListener(v -> {
-            sendToService(AlarmService.ACTION_SNOOZE);
+            sendToService(AlarmService.ACTION_STOP, 0);
             finish();
         });
         details.setOnClickListener(v -> {
@@ -315,18 +385,23 @@ public class AlarmActivity extends Activity {
             stopAndLaunch(i);
         });
 
-        setContentView(root);
+        setContentView(frame);
     }
 
     private void sendToService(String action) {
+        sendToService(action, 0);
+    }
+
+    private void sendToService(String action, int minutes) {
         Intent i = new Intent(this, AlarmService.class).setAction(action).putExtra("nid", nid);
+        if (minutes > 0) i.putExtra("minutes", minutes);
         if (json != null) i.putExtra("json", json);
         try {
             startService(i);
         } catch (Exception e) {
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             nm.cancel(nid);
-            if (AlarmService.ACTION_SNOOZE.equals(action)) AlarmReceiver.snooze(this, nid, json, 0);
+            if (AlarmService.ACTION_SNOOZE.equals(action)) AlarmReceiver.snooze(this, nid, json, 0, minutes);
         }
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         nm.cancel(nid);

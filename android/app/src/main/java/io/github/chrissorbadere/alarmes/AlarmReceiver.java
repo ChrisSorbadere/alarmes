@@ -80,9 +80,14 @@ public class AlarmReceiver extends BroadcastReceiver {
 
     /** Reprogramme l'alarme dans « snooze » minutes. Renvoie l'heure prévue. */
     static long snooze(Context c, int nid, String json, int ringIndex) {
+        return snooze(c, nid, json, ringIndex, 0);
+    }
+
+    static long snooze(Context c, int nid, String json, int ringIndex, int minutes) {
         JSONObject a = AlarmService.parse(json);
         int snoozeNid = AlarmStore.snoozeNidOf(nid);
-        long at = System.currentTimeMillis() + AlarmStore.snoozeMinutes(c) * 60000L;
+        int min = minutes > 0 ? Math.min(minutes, 720) : AlarmStore.snoozeMinutes(c);
+        long at = System.currentTimeMillis() + min * 60000L;
         try {
             a.put("nid", snoozeNid);
             a.put("at", at);

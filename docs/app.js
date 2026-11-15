@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.21.0';
+const VERSION = '1.21.1';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -784,7 +784,7 @@ function healthInfo() {
     if (ko.length) return { lvl: 'warn', txt: 'À régler : ' + ko.join(', ') };
   }
   if (!lastSync.count) return { lvl: 'ok', txt: 'Aucune sonnerie à programmer' };
-  return { lvl: 'ok', txt: `${lastSync.count} sonnerie${lastSync.count > 1 ? 's' : ''} programmée${lastSync.count > 1 ? 's' : ''} jusqu’au ${fmtShort(lastSync.until)}` };
+  return { lvl: 'ok', txt: `Tout est programmé · ${lastSync.count} sonnerie${lastSync.count > 1 ? 's' : ''} confiée${lastSync.count > 1 ? 's' : ''} à Android pour les 2 prochains mois (renouvelé à chaque ouverture)` };
 }
 function todayCardHTML() {
   const now = new Date();

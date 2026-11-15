@@ -160,7 +160,21 @@ public final class AlarmStore {
         return am.canScheduleExactAlarms();
     }
 
-    static void scheduleOne(Context c, int nid, long at, JSONObject a) {
+    static String lastScheduleError = null;
+
+    /** Programme une alarme. Renvoie false si Android l'a refusée (jamais d'exception). */
+    static boolean scheduleOne(Context c, int nid, long at, JSONObject a) {
+        try {
+            scheduleOneUnsafe(c, nid, at, a);
+            return true;
+        } catch (Exception e) {
+            lastScheduleError = e.getClass().getSimpleName() + (e.getMessage() != null ? " : " + e.getMessage() : "");
+            Log.w(TAG, "Programmation refusée", e);
+            return false;
+        }
+    }
+
+    private static void scheduleOneUnsafe(Context c, int nid, long at, JSONObject a) {
         AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
         PendingIntent pi = firePending(c, nid, a);
         String alarmId = a != null ? a.optString("alarmId", null) : null;
@@ -180,8 +194,88 @@ public final class AlarmStore {
     }
 
     static void cancelOne(Context c, int nid) {
-        AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
-        am.cancel(firePending(c, nid, null));
+        try {
+            AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+            am.cancel(firePending(c, nid, null));
+        } catch (Exception e) {
+            Log.w(TAG, "Annulation impossible", e);
+        }
+    }
+
+    /** État du système pour cette appli (diagnostic). */
+    static String sysState(Context c) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            sb.append("Android ").append(Build.VERSION.RELEASE).append(" · ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL);
+            sb.append(" · heure exacte ").append(canExact(c) ? "oui" : "NON");
+            if (Build.VERSION.SDK_INT >= 23) {
+                android.os.PowerManager pm = (android.os.PowerManager) c.getSystemService(Context.POWER_SERVICE);
+                sb.append(" · batterie non optimisée ").append(pm.isIgnoringBatteryOptimizations(c.getPackageName()) ? "oui" : "NON");
+            }
+            if (Build.VERSION.SDK_INT >= 28) {
+                android.app.ActivityManager am = (android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+                sb.append(" · arrière-plan ").append(am.isBackgroundRestricted() ? "RESTREINT" : "autorisé");
+                android.app.usage.UsageStatsManager us = (android.app.usage.UsageStatsManager) c.getSystemService(Context.USAGE_STATS_SERVICE);
+                int b = us.getAppStandbyBucket();
+                sb.append(" · classement ").append(b <= 10 ? "actif" : b <= 20 ? "régulier" : b <= 30 ? "fréquent" : b <= 40 ? "rare" : "RESTREINT").append(" (").append(b).append(')');
+            }
+        } catch (Exception e) {
+            sb.append(" · état illisible");
+        }
+        return sb.toString();
+    }
+
+    static boolean bgRestricted(Context c) {
+        try {
+            if (Build.VERSION.SDK_INT >= 28) return ((android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE)).isBackgroundRestricted();
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /** Note dans le journal pourquoi Android a arrêté l'appli depuis la dernière ouverture. */
+    static void logExits(Context c) {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.app.ActivityManager am = (android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> l = am.getHistoricalProcessExitReasons(c.getPackageName(), 0, 12);
+            SharedPreferences p = prefs(c);
+            long last = p.getLong("dernier_arret", 0), max = last;
+            for (int i = l.size() - 1; i >= 0; i--) {
+                android.app.ApplicationExitInfo e = l.get(i);
+                long t = e.getTimestamp();
+                if (t <= last) continue;
+                if (t > max) max = t;
+                String d = e.getDescription();
+                String dl = d == null ? "" : d.toLowerCase(java.util.Locale.ROOT);
+                boolean forced = dl.startsWith("stop ") || dl.contains("force") || dl.contains("forcestop");
+                log(c, (forced ? "ARRÊT FORCÉ" : "Appli arrêtée") + " " + hm(t) + " : " + exitLabel(e.getReason())
+                    + (d != null && !d.isEmpty() ? " [" + d + "]" : "")
+                    + (forced ? " → Android efface alors toutes les alarmes" : ""));
+            }
+            if (max > last) p.edit().putLong("dernier_arret", max).apply();
+        } catch (Exception e) {
+            Log.w(TAG, "Raisons d'arrêt illisibles", e);
+        }
+    }
+
+    static String exitLabel(int r) {
+        switch (r) {
+            case 1: return "s'est fermée seule";
+            case 2: return "tuée par le système (signal)";
+            case 3: return "mémoire insuffisante";
+            case 4: case 5: return "plantage";
+            case 6: return "appli bloquée (ANR)";
+            case 8: return "autorisation modifiée";
+            case 9: return "consommation jugée excessive";
+            case 10: return "fermée par l'utilisateur ou le système (balayage, « Tout fermer », arrêt forcé)";
+            case 11: return "session utilisateur arrêtée";
+            case 12: return "un composant dont elle dépend s'est arrêté";
+            case 13: return "arrêtée par le système (autre)";
+            case 14: return "gelée par le système";
+            case 15: return "état de l'appli modifié (désactivée/gelée)";
+            case 16: return "mise à jour de l'appli";
+            default: return "raison " + r;
+        }
     }
 
     /** Remplace toutes les alarmes programmées par la nouvelle liste. */
@@ -192,17 +286,20 @@ public final class AlarmStore {
             if (o != null) cancelOne(c, o.optInt("nid"));
         }
         long now = System.currentTimeMillis();
+        int failed = 0;
         JSONArray kept = new JSONArray();
         for (int i = 0; i < list.length(); i++) {
             JSONObject o = list.optJSONObject(i);
             if (o == null) continue;
             long at = o.optLong("at", 0);
             if (at <= now) continue;
-            scheduleOne(c, o.optInt("nid"), at, o);
+            // gardée dans la liste même si refusée : elle sera annulée/reprogrammée proprement au prochain passage
             kept.put(o);
+            if (!scheduleOne(c, o.optInt("nid"), at, o)) failed++;
         }
         prefs(c).edit().putString(KEY_LIST, kept.toString()).apply();
-        return kept.length();
+        if (failed > 0) log(c, "ERREUR : " + failed + " alarme(s) refusée(s) par Android (" + lastScheduleError + ")");
+        return kept.length() - failed;
     }
 
     static String firstLabel(JSONArray list) {
@@ -223,7 +320,7 @@ public final class AlarmStore {
             JSONObject o = list.optJSONObject(i);
             if (o == null) continue;
             long at = o.optLong("at", 0);
-            if (at > now) { scheduleOne(c, o.optInt("nid"), at, o); n++; }
+            if (at > now && scheduleOne(c, o.optInt("nid"), at, o)) n++;
         }
         return n;
     }

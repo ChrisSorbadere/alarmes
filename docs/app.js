@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.19.0';
+const VERSION = '1.20.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -393,11 +393,17 @@ function nativePayload() {
   const now = new Date();
   const to = addDays(now, HORIZON_DAYS);
   const list = [];
+  const used = new Set([1888888888]);
+  const uniq = n => { while (used.has(n)) n = n % 99999989 + 1; used.add(n); return n; };
+  payloadErrors = [];
   for (const a of S.alarms) {
     if (!a.enabled) continue;
-    for (const d of occurrences(a, now, to, 200)) {
+    let occ = [];
+    // une alarme mal formée ne doit jamais empêcher de programmer les autres
+    try { occ = occurrences(a, now, to, 200); } catch (e) { payloadErrors.push(`« ${a.title || 'Alarme'} » : ${e.message || e}`); }
+    for (const d of occ) {
       list.push({
-        nid: hashInt(a.id + '|' + d.getTime()),
+        nid: uniq(hashInt(a.id + '|' + d.getTime())),
         at: d.getTime(),
         title: a.title || 'Alarme',
         body: a.description || '',
@@ -421,7 +427,7 @@ function nativePayload() {
   for (const t of S.timers || []) {
     if (!t.endAt || t.endAt <= nowMs0) continue;
     list.push({
-      nid: hashInt('timer|' + t.id + '|' + t.endAt), at: t.endAt,
+      nid: uniq(hashInt('timer|' + t.id + '|' + t.endAt)), at: t.endAt,
       title: '⏳ ' + (t.label || 'Compte à rebours terminé'),
       body: `Compte à rebours de ${fmtDur(t.duration)} terminé.`,
       color: '#7c3aed', levelLabel: 'Compte à rebours', mode: 'alarm', alarmId: '', hasExtras: false,
@@ -451,6 +457,7 @@ function nativePayload() {
 }
 
 let lastSync = { count: 0, until: null };
+let payloadErrors = [];
 /* ---------- Santé des alarmes : alarmes perdues ou manquées ---------- */
 /** À appeler AVANT syncNative : compare ce qu'Android a encore en mémoire avec ce qui devrait sonner. */
 async function checkHealth(reason) {
@@ -506,12 +513,13 @@ async function openJournal() {
   let log = [];
   try { log = JSON.parse(d.log || '[]'); } catch (e) { /* ignore */ }
   ED = null; BE = null; DP = null;
-  const line = o => { const t = new Date(o.t); const bad = /ERREUR|MANQUÉE|PERDUES/.test(o.m); return `<div class="logl${bad ? ' bad' : ''}"><span>${fmtShort(t)} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}</span>${esc(o.m)}</div>`; };
+  const line = o => { const t = new Date(o.t); const bad = /ERREUR|MANQUÉE|PERDUES|ARRÊT FORCÉ|ATTENTION/.test(o.m); return `<div class="logl${bad ? ' bad' : ''}"><span>${fmtShort(t)} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}</span>${esc(o.m)}</div>`; };
   const nx = Number(d.nextAt) ? `${fmtShort(new Date(Number(d.nextAt)))} ${fmtTime(new Date(Number(d.nextAt)))}${d.nextOurs ? '' : ' (autre appli)'}` : 'aucune';
   $('#sheet').innerHTML = `
   <div class="sheet-head"><button data-jr="close">✕</button><h3>Journal des alarmes</h3><span></span></div>
   <div class="sheet-body">
     <p class="note" style="margin-top:0">${d.stored} sonnerie(s) en mémoire · prochaine alarme connue d’Android : <b>${nx}</b>.</p>
+    ${d.state ? `<p class="note" style="margin-top:0">${esc(d.state)}</p>` : ''}
     <div class="btns"><button class="btn small" data-jr="copy">📋 Copier</button><button class="btn small danger" data-jr="clear">Effacer</button></div>
     <div class="journal">${log.length ? log.slice().reverse().map(line).join('') : '<p class="note">Vide pour l’instant.</p>'}</div>
   </div>`;
@@ -519,7 +527,7 @@ async function openJournal() {
     const b = e.target.closest('[data-jr]'); if (!b) return;
     if (b.dataset.jr === 'close') { $('#sheet').onclick = null; closeSheet(); }
     if (b.dataset.jr === 'copy') {
-      const txt = log.map(o => `${new Date(o.t).toLocaleString('fr-FR')} — ${o.m}`).join('\n');
+      const txt = `Alarmes ${VERSION} · ${d.state || ''} · ${d.stored} en mémoire · prochaine ${nx}\n` + log.map(o => `${new Date(o.t).toLocaleString('fr-FR')} — ${o.m}`).join('\n');
       try { await navigator.clipboard.writeText(txt); toast('Journal copié'); } catch (e) { toast('Copie impossible'); }
     }
     if (b.dataset.jr === 'clear' && confirm('Effacer le journal ?')) { await Native.clearLog(); $('#sheet').onclick = null; closeSheet(); toast('Journal effacé'); }
@@ -532,12 +540,15 @@ async function syncNative() {
   const real = list.filter(x => x.nid !== 1888888888);
   lastSync = { count: real.length, until: real.length ? new Date(real[real.length - 1].at) : null };
   if (!Native) return;
-  await syncPhotos();
+  try { await syncPhotos(); } catch (e) { /* les photos ne doivent jamais bloquer la programmation */ }
   try {
-    await Native.setAll({ alarms: list, snoozeMin: Number(S.settings.snoozeMin) || 10 });
+    const res = await Native.setAll({ alarms: list, snoozeMin: Number(S.settings.snoozeMin) || 10 });
+    if (res && typeof res.scheduled === 'number' && res.scheduled < list.length) toast(`⚠️ ${list.length - res.scheduled} alarme(s) refusée(s) par Android : voir le journal`, 6000);
   } catch (e) {
-    toast('Programmation Android impossible : ' + (e.message || e));
+    toast('Programmation Android impossible : ' + (e.message || e), 6000);
+    try { await Native.addLog({ msg: 'ERREUR : programmation impossible (' + (e.message || e) + ')' }); } catch (e2) { /* ignore */ }
   }
+  for (const m of payloadErrors) try { await Native.addLog({ msg: 'ERREUR : alarme illisible, non programmée ' + m }); } catch (e) { /* ignore */ }
 }
 
 /* ---------- Sonnerie dans le navigateur (repli hors APK) ---------- */
@@ -3126,7 +3137,8 @@ async function renderSettings(v) {
         row(st.exact, 'Alarmes à l’heure exacte', 'Sinon Android peut retarder la sonnerie', `<button class="btn small" data-open="exact">Régler</button>`) +
         row(st.fullScreen, 'Écran plein sur téléphone verrouillé', 'Affiche la raison en grand quand ça sonne', `<button class="btn small" data-open="fullScreen">Régler</button>`) +
         row(st.overlay, 'Afficher par-dessus les autres applis', 'Ouvre l’écran d’alarme même quand tu utilises le téléphone', `<button class="btn small" data-open="overlay">Régler</button>`) +
-        row(st.batteryFree, 'Pas d’économie de batterie', 'Sur realme/ColorOS, évite que l’appli soit endormie', `<button class="btn small" data-open="battery">Régler</button>`)
+        row(st.batteryFree, 'Pas d’économie de batterie', 'Sur realme/ColorOS, évite que l’appli soit endormie', `<button class="btn small" data-open="battery">Régler</button>`) +
+        row(st.bgFree !== false, 'Activité en arrière-plan autorisée', 'Si elle est restreinte, la sonnerie peut être bloquée', `<button class="btn small" data-open="app">Régler</button>`)
         : '<p class="note">État indisponible.</p>'}
       <div class="btns"><button class="btn primary" data-set="test">🔔 Tester une alarme dans 5 s</button></div>
       <p class="note">${lastSync.count} sonnerie(s) programmée(s) dans Android${lastSync.until ? `, jusqu'au ${fmtShort(lastSync.until)}` : ''}. Le programme est prolongé à chaque ouverture de l'appli : ouvre-la au moins une fois par mois.</p>
@@ -3139,6 +3151,8 @@ async function renderSettings(v) {
       <div class="note" style="margin:0 0 6px">Puis : Utilisation de la batterie › « Démarrage automatique ».</div>
       <div>• <b>Batterie</b> : Alarmes › Utilisation de la batterie › « Autoriser l’activité en arrière-plan ».</div>
       <div style="margin-top:6px">• <b>Applis récentes</b> : touche ⋮ (ou appui long) sur la carte Alarmes › <b>Verrouiller</b> (cadenas).</div>
+      <div style="margin-top:6px">• <b>Fiche de l’appli</b> : désactive « Suspendre l’activité de l’appli si inutilisée ».</div>
+      <div style="margin-top:6px">• <b>Paramètres › Batterie</b> : Alarmes ne doit pas figurer dans « Gel rapide des applis », et désactive « Optimisation de la veille » si des alarmes du matin manquent.</div>
       <div style="margin-top:6px">• <b>Notifications</b> : catégorie « Alarmes » avec Bannière et Écran de verrouillage cochés.</div>
       <div style="margin-top:6px">• <b>Accès spécial</b> (Paramètres › Applis) : « Afficher par-dessus d’autres applis » et, s’il existe, « Notifications plein écran » ou « Afficher sur l’écran de verrouillage ».</div>
       <div class="btns"><button class="btn small" data-open="app">Ouvrir la fiche de l’appli</button></div>
@@ -3473,11 +3487,13 @@ async function start() {
     const b = $('#modeBadge'); b.hidden = false; b.textContent = 'navigateur';
   }
   go('list');
-  if (await syncEvents()) render();
+  // d'abord la vérification (avant toute modification des alarmes), puis la reprogrammation, le reste ensuite
+  try { await checkHealth('Appli ouverte'); } catch (e) { /* ignore */ }
+  await syncNative();
+  if ((S.missed && S.missed.length) || S.lost) render();
+  try { if (await syncEvents()) { render(); await syncNative(); } } catch (e) { /* ignore */ }
   S.lastUpdateCheck = Number(S.settings.lastUpdateCheck || 0) || null;
   checkUpdate(false).then(u => { if (u && S.tab === 'list') refreshView(); });
-  await checkHealth('Appli ouverte');
-  await syncNative();
   if (Native) {
     try {
       const st = await Native.status();
@@ -3487,8 +3503,8 @@ async function start() {
     Native.addListener('openAlarm', r => handleOpenAlarm(r.alarmId));
     document.addEventListener('visibilitychange', async () => {
       if (document.hidden) return;
-      await syncEvents();
-      await checkHealth();
+      try { await checkHealth(); } catch (e) { /* ignore */ }
+      try { await syncEvents(); } catch (e) { /* ignore */ }
       await syncNative();
       if (S.tab !== 'import' && $('#sheet').hidden) refreshView();
     });

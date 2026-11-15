@@ -73,6 +73,7 @@ public class AlarmService extends Service {
             if (curNid != 0 && curNid != nid) {
                 // Une autre alarme sonnait encore : on l'arrête sans relance.
                 int prev = curNid;
+                AlarmStore.log(this, "Une autre alarme sonnait encore : elle est remplacée par la nouvelle");
                 stopSoundAndVibration();
                 nm.cancel(prev);
             }

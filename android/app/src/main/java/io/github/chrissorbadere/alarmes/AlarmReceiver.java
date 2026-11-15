@@ -43,6 +43,11 @@ public class AlarmReceiver extends BroadcastReceiver {
             return;
         }
         if (AlarmStore.ACTION_FIRE.equals(action)) {
+            // garde le téléphone éveillé le temps que le service de sonnerie démarre
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) c.getSystemService(Context.POWER_SERVICE);
+                pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "Alarmes:reception").acquire(15000L);
+            } catch (Exception ignored) {}
             String json = intent.getStringExtra("json");
             JSONObject a = AlarmService.parse(json);
             AlarmStore.markFired(c, nid);
@@ -54,6 +59,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                 show(c, nid, a);
                 return;
             }
+            if (AlarmStore.bgRestricted(c)) AlarmStore.log(c, "ATTENTION : l'appli est en « arrière-plan restreint », la sonnerie peut être bloquée");
             Intent s = new Intent(c, AlarmService.class)
                 .setAction(AlarmService.ACTION_START)
                 .putExtra("nid", nid)

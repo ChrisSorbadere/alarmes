@@ -59,6 +59,7 @@ public class AlarmNativePlugin extends Plugin {
     @Override
     public void load() {
         AlarmStore.ensureChannels(getContext());
+        AlarmStore.logExits(getContext());
         Intent i = getActivity().getIntent();
         if (i != null) pendingOpen = i.getStringExtra("openAlarm");
     }
@@ -124,6 +125,8 @@ public class AlarmNativePlugin extends Plugin {
         } catch (Exception ignored) {}
         r.put("nextAt", nextAt);
         r.put("nextOurs", ours);
+        r.put("state", AlarmStore.sysState(c));
+        r.put("bgRestricted", AlarmStore.bgRestricted(c));
         call.resolve(r);
     }
 
@@ -193,6 +196,7 @@ public class AlarmNativePlugin extends Plugin {
         r.put("batteryFree", battery);
         r.put("scheduled", AlarmStore.load(c).length());
         r.put("overlay", Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(c));
+        r.put("bgFree", !AlarmStore.bgRestricted(c));
         call.resolve(r);
     }
 

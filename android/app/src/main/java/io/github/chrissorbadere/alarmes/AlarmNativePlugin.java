@@ -97,6 +97,7 @@ public class AlarmNativePlugin extends Plugin {
             return;
         }
         AlarmStore.log(c, "Programmation : " + n + " alarme(s) · prochaine " + AlarmStore.firstLabel(AlarmStore.load(c)));
+        KeepAliveService.start(c, null);
         JSObject r = new JSObject();
         r.put("scheduled", n);
         call.resolve(r);
@@ -127,6 +128,20 @@ public class AlarmNativePlugin extends Plugin {
         r.put("nextOurs", ours);
         r.put("state", AlarmStore.sysState(c));
         r.put("bgRestricted", AlarmStore.bgRestricted(c));
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void keepAlive(PluginCall call) {
+        Boolean on = call.getBoolean("on");
+        if (on != null && on != KeepAliveService.enabled(getContext())) {
+            KeepAliveService.setEnabled(getContext(), on);
+            AlarmStore.log(getContext(), "Garde des alarmes " + (on ? "activée" : "désactivée"));
+        } else if (on != null && on) {
+            KeepAliveService.start(getContext(), null);
+        }
+        JSObject r = new JSObject();
+        r.put("on", KeepAliveService.enabled(getContext()));
         call.resolve(r);
     }
 

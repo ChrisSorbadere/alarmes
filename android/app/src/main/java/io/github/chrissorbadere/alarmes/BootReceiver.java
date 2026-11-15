@@ -15,5 +15,6 @@ public class BootReceiver extends BroadcastReceiver {
             : act.endsWith("TIME_SET") ? "Heure du téléphone modifiée"
             : act.endsWith("TIMEZONE_CHANGED") ? "Fuseau horaire modifié" : "Autorisation modifiée";
         AlarmStore.log(c, why + " : " + n + " alarme(s) reprogrammée(s)");
+        KeepAliveService.start(c, why);
     }
 }

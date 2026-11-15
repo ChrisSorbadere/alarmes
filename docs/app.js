@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.21.3';
+const VERSION = '1.22.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -3456,12 +3456,17 @@ async function renderSettings(v) {
       <p class="note">${lastSync.count} sonnerie(s) programmée(s) dans Android${lastSync.until ? `, jusqu'au ${fmtShort(lastSync.until)}` : ''}. Le programme est prolongé à chaque ouverture de l'appli : ouvre-la au moins une fois par mois.</p>
     </div>
     <h2>Réglages realme / ColorOS à vérifier</h2>
+    <div class="card">
+      <div class="row"><div><b>🛡 Garde des alarmes</b><div class="note" style="margin:0">Petite notification permanente « Prochaine : … ». Elle empêche realme d’arrêter l’appli de force (ce qui efface toutes les alarmes). Recommandé.</div></div>
+        <label class="switch"><input type="checkbox" id="setKeep" ${S.settings.keepAlive !== false ? 'checked' : ''}><span></span></label></div>
+    </div>
     <div class="card note">
       <div><b>Indispensable pour que les alarmes ne soient pas effacées</b> quand tu balaies l’appli ou la nuit :</div>
       <div style="margin-top:6px">• <b>Démarrage automatique</b> : active-le pour Alarmes.</div>
       <div class="btns" style="margin:6px 0"><button class="btn small primary" data-open="autostart">Ouvrir la fiche de l’appli</button></div>
       <div class="note" style="margin:0 0 6px">Puis : Utilisation de la batterie › « Démarrage automatique ».</div>
       <div>• <b>Batterie</b> : Alarmes › Utilisation de la batterie › « Autoriser l’activité en arrière-plan ».</div>
+      <div style="margin-top:6px">• <b>Paramètres › Batterie › Plus de paramètres</b> : désactive « Optimisation de la veille » et l’économie d’énergie intelligente.</div>
       <div style="margin-top:6px">• <b>Applis récentes</b> : touche ⋮ (ou appui long) sur la carte Alarmes › <b>Verrouiller</b> (cadenas).</div>
       <div style="margin-top:6px">• <b>Fiche de l’appli</b> : désactive « Suspendre l’activité de l’appli si inutilisée ».</div>
       <div style="margin-top:6px">• <b>Paramètres › Batterie</b> : Alarmes ne doit pas figurer dans « Gel rapide des applis », et désactive « Optimisation de la veille » si des alarmes du matin manquent.</div>
@@ -3638,6 +3643,11 @@ function bindSettings() {
     }
     if (e.target.id === 'restoreFile' && e.target.files[0]) { await doRestore(e.target.files[0], S.restoreMode || 'merge'); return; }
     if (e.target.id === 'setDur') { S.settings.ringMin = Number(e.target.value); await saveSettings(); toast('Durée : ' + e.target.value + ' min'); }
+    if (e.target.id === 'setKeep') {
+      S.settings.keepAlive = e.target.checked; await saveSettings();
+      try { await Native.keepAlive({ on: S.settings.keepAlive }); } catch (err) { /* ignore */ }
+      toast(S.settings.keepAlive ? '🛡 Garde activée : notification « Prochaine… » affichée' : 'Garde désactivée', 3500);
+    }
     if (e.target.id === 'setSpeak') { S.settings.speak = e.target.checked; await saveSettings(); toast('Annonce vocale : ' + (S.settings.speak ? 'activée' : 'désactivée')); }
     if (e.target.id === 'setFade') { S.settings.fadeSec = Number(e.target.value); await saveSettings(); toast('Volume progressif : ' + fadeLabel(e.target.value).toLowerCase()); }
     if (e.target.id === 'setMax') { S.settings.maxVol = e.target.value === '1'; await saveSettings(); toast('Finir au volume max : ' + (S.settings.maxVol ? 'oui' : 'non')); }
@@ -3826,6 +3836,7 @@ async function start() {
       S.sys = st;
       if (!st.notifications) await Native.requestNotifications();
     } catch (e) { /* ignore */ }
+    try { await Native.keepAlive({ on: S.settings.keepAlive !== false }); } catch (e) { /* ancienne version native */ }
     updateToday();
     syncBackup();
     try { const r = await Native.getLaunchAlarm(); if (r && r.alarmId) handleOpenAlarm(r.alarmId); } catch (e) { /* ignore */ }

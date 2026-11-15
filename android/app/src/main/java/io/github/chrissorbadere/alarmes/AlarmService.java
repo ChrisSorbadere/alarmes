@@ -439,6 +439,7 @@ public class AlarmService extends Service {
         if (fadeTask != null) handler.removeCallbacks(fadeTask);
         fadeTask = null;
         restoreAlarmVolume();
+        KeepAliveService.start(this, null);
         stopSpeak();
         stopSound();
         abandonFocus();

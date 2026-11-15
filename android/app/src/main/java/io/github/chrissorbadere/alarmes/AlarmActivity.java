@@ -106,7 +106,7 @@ public class AlarmActivity extends Activity {
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 17);
         b.setTextColor(fg);
         b.setSingleLine(true);
         b.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -184,19 +184,33 @@ public class AlarmActivity extends Activity {
             frame.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
+        // Écran = zone défilante (heure, titre, photos, description) + panneau du bas TOUJOURS visible (reporter, Arrêter)
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        frame.addView(outer, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        ScrollView topScroll = new ScrollView(this);
+        topScroll.setFillViewport(true);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(22), dp(36), dp(22), dp(20));
-        frame.addView(root, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        root.setOnApplyWindowInsetsListener((v, insets) -> {
-            v.setPadding(dp(22), dp(28) + insets.getSystemWindowInsetTop(), dp(22), dp(16) + insets.getSystemWindowInsetBottom());
+        topScroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        outer.addView(topScroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.VERTICAL);
+        outer.addView(bottom, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.setPadding(dp(22), dp(28), dp(22), dp(8));
+        bottom.setPadding(dp(22), 0, dp(22), dp(16));
+        outer.setOnApplyWindowInsetsListener((v, insets) -> {
+            root.setPadding(dp(22), dp(20) + insets.getSystemWindowInsetTop(), dp(22), dp(8));
+            bottom.setPadding(dp(22), 0, dp(22), dp(12) + insets.getSystemWindowInsetBottom());
             return insets;
         });
+        // taille limitée : les grands caractères du téléphone ne doivent pas pousser les boutons hors de l'écran
+        float fs = Math.min(1.15f, getResources().getConfiguration().fontScale);
 
         Date nowD = new Date();
         TextView time = new TextView(this);
         time.setText(new SimpleDateFormat("HH:mm", Locale.FRANCE).format(nowD));
-        time.setTextSize(TypedValue.COMPLEX_UNIT_SP, 76);
+        time.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 68);
         time.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         time.setTextColor(fg);
         time.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -205,7 +219,7 @@ public class AlarmActivity extends Activity {
 
         TextView day = new TextView(this);
         day.setText(new SimpleDateFormat("EEEE d MMMM", Locale.FRANCE).format(nowD));
-        day.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        day.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15 * fs);
         day.setTextColor(fg);
         day.setAlpha(0.8f);
         day.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -215,7 +229,7 @@ public class AlarmActivity extends Activity {
         if (!tag.isEmpty()) {
             TextView lvl = new TextView(this);
             lvl.setText(tag.toUpperCase(Locale.FRANCE));
-            lvl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            lvl.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12);
             lvl.setLetterSpacing(0.15f);
             lvl.setTypeface(Typeface.DEFAULT_BOLD);
             GradientDrawable pill = new GradientDrawable();
@@ -232,7 +246,7 @@ public class AlarmActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText(data.optString("title", "Alarme"));
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 26 * fs);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(fg);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -247,7 +261,7 @@ public class AlarmActivity extends Activity {
             hs.setHorizontalScrollBarEnabled(false);
             LinearLayout strip = new LinearLayout(this);
             strip.setOrientation(LinearLayout.HORIZONTAL);
-            int h = dp(photoCount == 1 ? 190 : 150);
+            int h = dp(photoCount == 1 ? 170 : 130);
             int shown = 0;
             for (int i = 0; i < photoCount; i++) {
                 File f = photoFile(this, alarmId, i);
@@ -282,21 +296,19 @@ public class AlarmActivity extends Activity {
 
         // Description, lisible de loin
         String txt = data.optString("body", "");
-        ScrollView sv = new ScrollView(this);
         if (!txt.isEmpty()) {
             GradientDrawable box = new GradientDrawable();
             box.setColor(soft);
             box.setCornerRadius(dp(18));
-            sv.setBackground(box);
             TextView body = new TextView(this);
+            body.setBackground(box);
             body.setText(txt);
-            body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
+            body.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 19 * fs);
             body.setLineSpacing(0, 1.25f);
             body.setTextColor(fg);
             body.setPadding(dp(18), dp(14), dp(18), dp(14));
-            sv.addView(body);
+            root.addView(body, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         }
-        root.addView(sv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         // Contact et lieu
         String phone = data.optString("contactPhone", "");
@@ -328,11 +340,11 @@ public class AlarmActivity extends Activity {
         // Reporter : durée au choix
         TextView later = new TextView(this);
         later.setText("Reporter de");
-        later.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        later.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13 * fs);
         later.setTextColor(fg);
         later.setAlpha(0.8f);
-        later.setPadding(dp(4), dp(14), 0, dp(6));
-        root.addView(later);
+        later.setPadding(dp(4), dp(10), 0, dp(6));
+        bottom.addView(later);
 
         java.util.TreeSet<Integer> choices = new java.util.TreeSet<>(java.util.Arrays.asList(5, 10, 30, 60));
         int def = AlarmStore.snoozeMinutes(this);
@@ -342,9 +354,11 @@ public class AlarmActivity extends Activity {
         int k = 0;
         for (int min : choices) {
             Button sb = button(min >= 60 ? (min / 60) + " h" + (min % 60 > 0 ? " " + (min % 60) : "") : min + " min", soft, fg);
-            sb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            sb.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+            if (Build.VERSION.SDK_INT >= 26) sb.setAutoSizeTextTypeUniformWithConfiguration(10, 16, 1, TypedValue.COMPLEX_UNIT_DIP);
             if (min == def) sb.setTypeface(Typeface.DEFAULT_BOLD);
-            sb.setPadding(dp(4), dp(14), dp(4), dp(14));
+            sb.setPadding(dp(2), dp(12), dp(2), dp(12));
+            sb.setMinHeight(dp(52));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
             if (k++ > 0) lp.setMargins(dp(8), 0, 0, 0);
             final int fmin = min;
@@ -354,25 +368,25 @@ public class AlarmActivity extends Activity {
             });
             row.addView(sb, lp);
         }
-        root.addView(row);
+        bottom.addView(row);
 
         int btnBg = photoBg ? Color.WHITE : (isLight(color) ? Color.parseColor("#111111") : Color.WHITE);
         int btnFg = photoBg ? Color.parseColor("#111111") : (isLight(color) ? Color.WHITE : Color.parseColor("#111111"));
         Button stop = button("Arrêter", btnBg, btnFg);
-        stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        stop.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 24);
         stop.setTypeface(Typeface.DEFAULT_BOLD);
         LinearLayout.LayoutParams stopLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(76));
         stopLp.setMargins(0, dp(12), 0, 0);
-        root.addView(stop, stopLp);
+        bottom.addView(stop, stopLp);
 
         TextView details = new TextView(this);
         details.setText("Voir les détails dans l'appli ›");
-        details.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        details.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14 * fs);
         details.setTextColor(fg);
         details.setAlpha(0.85f);
         details.setGravity(Gravity.CENTER_HORIZONTAL);
-        details.setPadding(0, dp(14), 0, dp(4));
-        root.addView(details);
+        details.setPadding(0, dp(12), 0, dp(2));
+        bottom.addView(details);
 
         stop.setOnClickListener(v -> {
             sendToService(AlarmService.ACTION_STOP, 0);

@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.23.0';
+const VERSION = '1.24.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -885,6 +885,7 @@ function renderList(v) {
   if (!$('#listSearch', v)) {
     v.innerHTML = `<div class="searchbar">
         <input type="search" id="listSearch" placeholder="🔍 Rechercher un mot…" autocomplete="off">
+        <button class="btn small" data-cmdopen="1" aria-label="Commande">✍️</button>
         <button class="btn small" data-sel="toggle" id="selToggle"></button>
       </div><div id="listBody"></div>`;
     $('#listSearch', v).value = S.search;
@@ -2114,6 +2115,315 @@ function renderCalendarTab(v) {
   updateSelBar();
 }
 
+/* ---------- Commandes en une phrase : supprimer, désactiver, sauter, pause, décaler… ---------- */
+const CMD_VERBS = [
+  [/^(supprime[rz]?|efface[rz]?|annule[rz]?|retire[rz]?|enl[eè]ve[rz]?)\b/, 'del'],
+  [/^(d[ée]sactive[rz]?|coupe[rz]?|[ée]teins?)\b/, 'off'],
+  [/^(r[ée]active[rz]?|active[rz]?|rallume[rz]?)\b/, 'on'],
+  [/^(saute[rz]?|zappe[rz]?|passe[rz]?)\b/, 'skip'],
+  [/^(reprends?|reprendre|fin de (la )?pause|arr[eê]te (la )?pause)\b/, 'resume'],
+  [/^(mets? en pause|met en pause|pause|suspend[sr]?e?)\b/, 'pause'],
+  [/^(d[ée]cale[rz]?|d[ée]place[rz]?|retarde[rz]?|repousse[rz]?)\b/, 'later'],
+  [/^(avance[rz]?)\b/, 'earlier'],
+];
+const CMD_LABEL = { del: 'Supprimer', off: 'Désactiver', on: 'Réactiver', skip: 'Sauter', pause: 'Mettre en pause', resume: 'Reprendre', later: 'Décaler', earlier: 'Avancer' };
+
+function parseCommand(text, now = new Date()) {
+  const raw = (text || '').trim();
+  let s = ' ' + norm(raw).replace(/[’']/g, ' ').replace(/[,;!?.]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';
+  let verb = null;
+  for (const [re, v] of CMD_VERBS) { const m = s.trim().match(re); if (m) { verb = v; s = ' ' + s.trim().slice(m[0].length) + ' '; break; } }
+  if (!verb) return { verb: 'create' };
+  const cut = re => { const m = s.match(re); if (m) s = s.replace(m[0], ' '); return m; };
+  const WD = { dimanche: 0, lundi: 1, mardi: 2, mercredi: 3, jeudi: 4, vendredi: 5, samedi: 6 };
+  const MO = ['janv', 'fevr', 'mars', 'avr', 'mai', 'juin', 'juil', 'aout', 'sept', 'oct', 'nov', 'dec'];
+  const t0 = today0();
+  const q = { verb, from: null, to: null, wds: [], time: null, words: '', imported: false, all: false, shift: 0, dated: false };
+  let m;
+  // décalage « de 15 min », « d 1 h », « de 1h30 »
+  if (verb === 'later' || verb === 'earlier') {
+    if ((m = cut(/\b(?:de |d )([+-]?\d+)\s*(?:h|heures?)\s*(\d{1,2})?\b/))) q.shift = Number(m[1]) * 60 + (m[2] ? Number(m[2]) : 0);
+    else if ((m = cut(/\b(?:de |d )?([+-]?\d+)\s*(?:min|minutes?|mn)\b/))) q.shift = Number(m[1]);
+    if (verb === 'earlier') q.shift = -Math.abs(q.shift);
+  }
+  // date seule (jj/mm[/aa]) ou « 3 décembre »
+  const dateAt = (str) => {
+    let mm;
+    if ((mm = str.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/))) {
+      let y = mm[3] ? Number(mm[3]) : now.getFullYear(); if (y < 100) y += 2000;
+      let d = new Date(y, Number(mm[2]) - 1, Number(mm[1]));
+      if (!mm[3] && d < addDays(t0, -60)) d = new Date(y + 1, Number(mm[2]) - 1, Number(mm[1]));
+      return d;
+    }
+    if ((mm = str.match(/^(\d{1,2})(?:er)?\s+([a-z]+)$/))) {
+      const mo = MO.findIndex(x => mm[2].startsWith(x)); if (mo < 0) return null;
+      let d = new Date(now.getFullYear(), mo, Number(mm[1]));
+      if (d < addDays(t0, -60)) d = new Date(now.getFullYear() + 1, mo, Number(mm[1]));
+      return d;
+    }
+    if ((mm = str.match(/^(\d{1,2})(?:er)?$/))) {
+      let d = new Date(now.getFullYear(), now.getMonth(), Number(mm[1]));
+      if (d < t0) d = new Date(now.getFullYear(), now.getMonth() + 1, Number(mm[1]));
+      return d;
+    }
+    return null;
+  };
+  const DATE = '(\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?:er)? (?:janv\\w*|fevr\\w*|mars|avr\\w*|mai|juin|juil\\w*|aout|sept\\w*|oct\\w*|nov\\w*|dec\\w*)|\\d{1,2}(?:er)?)';
+  if ((m = cut(new RegExp('\\b(?:du|de) (?:le )?' + DATE + ' (?:au|a|jusqu au) (?:le )?' + DATE + '\\b')))) { q.from = dateAt(m[1]); q.to = dateAt(m[2]); }
+  if ((m = cut(new RegExp('\\b(?:a partir du|a partir de|des le|depuis le|apres le|a compter du) ' + DATE + '\\b')))) { q.from = dateAt(m[1]); if (/apres/.test(m[0]) && q.from) q.from = addDays(q.from, 1); }
+  if ((m = cut(new RegExp('\\b(?:jusqu au|jusqu a|avant le) ' + DATE + '\\b')))) { q.to = dateAt(m[1]); if (/avant/.test(m[0]) && q.to) q.to = addDays(q.to, -1); }
+  if (!q.from && !q.to) {
+    if (cut(/\bapres demain\b/)) q.from = q.to = addDays(t0, 2);
+    else if (cut(/\bdemain\b/)) q.from = q.to = addDays(t0, 1);
+    else if (cut(/\b(aujourd hui|ce soir|ce matin|cet apres midi)\b/)) q.from = q.to = t0;
+    else if (cut(/\bla semaine prochaine\b/)) { const mon = addDays(t0, ((8 - t0.getDay()) % 7) || 7); q.from = mon; q.to = addDays(mon, 6); }
+    else if (cut(/\bcette semaine\b/)) { q.from = t0; q.to = addDays(t0, (7 - t0.getDay()) % 7); }
+    else if ((m = cut(/\b(?:en|de|d|pour|du mois de|au mois de) (janv\w*|fevr\w*|mars|avr\w*|mai|juin|juil\w*|aout|sept\w*|oct\w*|nov\w*|dec\w*)\b/))) {
+      const mo = MO.findIndex(x => m[1].startsWith(x));
+      let y = now.getFullYear(); if (mo < now.getMonth() - 1) y++;
+      q.from = new Date(y, mo, 1); q.to = new Date(y, mo + 1, 0);
+    } else if ((m = cut(new RegExp('\\b(?:le |du |pour le )(' + DATE.slice(1, -1) + ')\\b(?! ?h)'))) || (m = cut(/\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/))) { const d = dateAt(m[1]); if (d) q.from = q.to = d; }
+  }
+  // jours de la semaine : pluriel/« les »/« chaque » = filtre ; singulier = prochain jour
+  if ((m = cut(/\b(?:tous les |toutes les |chaque |les |du |le |des )?((?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)s?(?: (?:et|ou) (?:le |les )?(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)s?)*)( prochain)?\b/))) {
+    const days = (m[1].match(/lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche/g) || []).map(x => WD[x]);
+    const plural = /s\b/.test(m[1]) || /tous|toutes|chaque|les |des |du /.test(m[0]) || days.length > 1;
+    if (plural || q.from || q.to) q.wds = days;
+    else { const add = ((days[0] - now.getDay() + 7) % 7) || 7; q.from = q.to = addDays(t0, add); }
+  }
+  // heure
+  if ((m = cut(/\b(?:a |de |vers |pour )?(\d{1,2})\s*(?:h|:)\s*(\d{2})?\b/))) {
+    const h = Number(m[1]), mi = m[2] ? Number(m[2]) : 0;
+    if (h < 24 && mi < 60) q.time = `${pad(h)}:${pad(mi)}`;
+  }
+  if (cut(/\b(importees?|du fichier|des imports?)\b/)) q.imported = true;
+  if (cut(/\b(toutes? (les )?alarmes?|tout|toutes|tous)\b/)) q.all = true;
+  // reste = mots du titre
+  let w = s.replace(/\b(l|la|le|les|un|une|des|de|du|d|alarmes?|rappels?|sonneries?|mes|mon|ma|pour|a|au|aux|et|qui|sonne|sonnent|en|jusqu)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  q.words = w;
+  q.dated = !!(q.from || q.to || q.wds.length || q.time);
+  if (verb === 'pause' && !q.to && q.from) { q.to = q.from; q.from = t0; }
+  return q;
+}
+
+function cmdSummary(q) {
+  const p = [CMD_LABEL[q.verb]];
+  p.push(q.words ? `« ${q.words} »` : (q.imported ? 'les alarmes importées' : 'toutes les alarmes'));
+  if (q.wds.length) p.push('les ' + q.wds.map(x => JOURS[x] + 's').join(' et '));
+  if (q.from && q.to && ymd(q.from) === ymd(q.to)) p.push('le ' + fmtShort(q.from));
+  else { if (q.from) p.push('à partir du ' + fmtShort(q.from)); if (q.to) p.push('jusqu’au ' + fmtShort(q.to)); }
+  if (q.time) p.push('à ' + q.time);
+  if (q.shift) p.push(`de ${q.shift > 0 ? '+' : ''}${q.shift} min`);
+  return p.join(' · ');
+}
+
+/** Alarmes correspondant aux mots / à l'import. */
+function cmdAlarms(q) {
+  const words = q.words ? q.words.split(' ').filter(x => x.length > 1) : [];
+  const pool = S.alarms.filter(a => !q.imported || a.source);
+  if (!words.length) return pool;
+  const clean = a => norm(a.title || '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // 1. titre exactement égal (« Lycée » ≠ « Partir au lycée »), 2. titre contenant tous les mots, 3. description
+  const exact = pool.filter(a => clean(a) === words.join(' '));
+  if (exact.length) return exact;
+  const inTitle = pool.filter(a => words.every(x => clean(a).includes(x)));
+  if (inTitle.length) return inTitle;
+  return pool.filter(a => { const t = norm(a.description || ''); return words.every(x => t.includes(x)); });
+}
+
+/** Sonneries visées (alarme + date) dans la période et les filtres. */
+function cmdHits(q, list) {
+  const from = q.from && q.from > today0() ? q.from : new Date();
+  const to = q.to ? new Date(q.to.getFullYear(), q.to.getMonth(), q.to.getDate(), 23, 59) : addDays(new Date(), 400);
+  const hits = [];
+  for (const a of list) {
+    for (const d of occurrences({ ...a, enabled: true }, from, to, 800)) {
+      if (q.wds.length && !q.wds.includes(d.getDay())) continue;
+      if (q.time && fmtTime(d) !== q.time) continue;
+      hits.push({ a, d, ds: ymd(d) });
+    }
+  }
+  return hits.sort((x, y) => x.d - y.d);
+}
+
+let CMD = null;
+
+function openCommand(prefill) {
+  ED = null; BE = null; DP = null; CF = null;
+  CMD = { text: prefill || '', q: null };
+  renderCommand();
+  showSheet();
+  setTimeout(() => { const i = $('#cmdText'); if (i && !prefill) i.focus(); }, 80);
+}
+
+function renderCommand() {
+  const c = CMD, q = c.q;
+  let body = '';
+  if (q && q.verb === 'resume') {
+    const p = activePause();
+    body = `<div class="card note">${p ? `Arrêter la pause en cours (${esc(pauseLabel(p))}) ?` : 'Aucune pause en cours.'}</div>
+      ${p ? '<div class="btns"><button class="btn primary" data-cmd="apply">Reprendre maintenant</button></div>' : ''}`;
+  } else if (q && q.verb === 'pause' && !q.words && !q.imported) {
+    const until = q.to || addDays(today0(), 6);
+    c.pauseUntil = until;
+    body = `<div class="card note">Mettre <b>toutes les alarmes</b> en pause jusqu’au <b>${fmtShort(until)}</b> inclus. Elles reprendront ensuite toutes seules.</div>
+      <div class="btns"><button class="btn primary" data-cmd="apply">⏸ Mettre en pause</button></div>`;
+  } else if (q) {
+    const list = cmdAlarms(q);
+    const whole = (q.verb === 'off' || q.verb === 'on' || q.verb === 'del' || q.verb === 'later' || q.verb === 'earlier') && !q.dated;
+    c.whole = whole;
+    if (!list.length) body = `<div class="card note">Aucune alarme ne correspond à « ${esc(q.words || '…')} ». Essaie un autre mot du titre.</div>`;
+    else if (whole) {
+      c.list = list; c.pick = c.pick || new Set(list.map(a => a.id));
+      body = `<p class="note" style="margin-top:0"><b>${list.length}</b> alarme${list.length > 1 ? 's' : ''} trouvée${list.length > 1 ? 's' : ''} (${q.verb === 'del' ? 'toutes leurs dates' : 'en entier'}). Décoche celles à garder :</p>
+        <div class="cmdlist">${list.slice(0, 300).map(a => `<button class="cmditem ${c.pick.has(a.id) ? 'on' : ''}" data-cmda="${a.id}"><i>${c.pick.has(a.id) ? '✓' : ''}</i><span><b>${esc(titleOf(a))}</b><small>${esc(isRel(a) ? relLabel(a.schedule.rel) : a.time)} · ${esc(scheduleSummary(a))}${a.enabled ? '' : ' · désactivée'}</small></span></button>`).join('')}</div>`;
+      if (q.verb === 'later' || q.verb === 'earlier') body += q.shift ? '' : '<p class="note">Précise la durée, ex. « décale Dossiers casier de 15 min ».</p>';
+      body += `<div class="btns"><button class="btn ${q.verb === 'del' ? 'danger' : 'primary'}" data-cmd="apply" ${c.pick.size && (q.shift || !/later|earlier/.test(q.verb)) ? '' : 'disabled'}>${CMD_LABEL[q.verb]} ${c.pick.size} alarme${c.pick.size > 1 ? 's' : ''}</button></div>`;
+    } else {
+      const hits = cmdHits(q, list);
+      c.hits = hits; c.pick = c.pick || new Set(hits.map((_, i) => i));
+      if (!hits.length) body = `<div class="card note">${list.length} alarme(s) « ${esc(q.words || 'toutes')} » trouvée(s), mais aucune sonnerie dans cette période.</div>`;
+      else {
+        const nA = new Set(hits.map(h => h.a.id)).size;
+        body = `<p class="note" style="margin-top:0"><b>${hits.length}</b> sonnerie${hits.length > 1 ? 's' : ''} trouvée${hits.length > 1 ? 's' : ''} (${nA} alarme${nA > 1 ? 's' : ''}). Touche une date pour la garder ou la reprendre :</p>
+          <div class="cmddates">${hits.slice(0, 400).map((h, i) => `<button class="chip ${c.pick.has(i) ? (q.verb === 'del' || q.verb === 'skip' || q.verb === 'off' || q.verb === 'pause' ? 'del' : 'on') : ''}" data-cmdh="${i}">${esc((h.a.title || 'Alarme').slice(0, 22))} · ${fmtShort(h.d)} ${fmtTime(h.d)}${q.shift && c.pick.has(i) ? ' → ' + fmtTime(new Date(h.d.getTime() + q.shift * 60000)) : ''}</button>`).join('')}</div>
+          ${hits.length > 400 ? `<p class="note">… et ${hits.length - 400} autres.</p>` : ''}
+          ${(q.verb === 'later' || q.verb === 'earlier') && !q.shift ? '<p class="note">Précise la durée, ex. « décale Dossiers casier demain de 15 min ».</p>' : ''}
+          <div class="chips" style="margin-top:8px"><button class="chip" data-cmd="all">Tout cocher</button><button class="chip" data-cmd="none">Tout décocher</button></div>
+          <div class="btns"><button class="btn ${q.verb === 'del' ? 'danger' : 'primary'}" data-cmd="apply" ${c.pick.size && (q.shift || !/later|earlier/.test(q.verb)) ? '' : 'disabled'}>${CMD_LABEL[q.verb === 'pause' ? 'skip' : q.verb]} ${c.pick.size} sonnerie${c.pick.size > 1 ? 's' : ''}</button></div>`;
+      }
+    }
+  }
+  $('#sheet').innerHTML = `
+  <div class="sheet-head"><button data-cmd="close">✕</button><h3>✍️ Commande</h3><span></span></div>
+  <div class="sheet-body">
+    <div class="nlbox" style="margin-top:0"><input type="text" id="cmdText" value="${esc(c.text)}" placeholder="Ex. « supprime les Dossiers casier du mercredi »" autocomplete="off" enterkeyhint="go"><button class="btn small primary" data-cmd="go">OK</button></div>
+    ${q ? `<div class="cmdsum">${esc(cmdSummary(q))}</div>` : `<p class="note">Écris ou dicte (micro du clavier) une phrase. L’appli te montre toujours ce qu’elle a compris <b>avant</b> d’agir, et tout ce qui est supprimé va dans la corbeille.</p>
+      <div class="chips">${['supprime les alarmes de demain', 'supprime Dossiers casier du mercredi', 'désactive Sandwich', 'réactive Sandwich', 'saute Debout demain', 'pause jusqu’au 25/11', 'reprends', 'décale Partir au lycée de 10 min', 'avance Dossiers casier vendredi de 15 min', 'supprime Lycée à partir du 1/12', 'mardi 8h rendre les copies 5B'].map(x => `<button class="chip" data-cmdex="${esc(x)}">${esc(x)}</button>`).join('')}</div>`}
+    ${body}
+  </div>`;
+}
+
+async function cmdClick(e) {
+  const b = e.target.closest('button'); if (!b) return;
+  const c = CMD;
+  const keep = () => { const y = $('#sheet').scrollTop; renderCommand(); $('#sheet').scrollTop = y; };
+  if (b.dataset.cmd === 'close') { closeSheet(); return; }
+  if (b.dataset.cmdex) { c.text = b.dataset.cmdex; return cmdGo(); }
+  if (b.dataset.cmd === 'go') { c.text = ($('#cmdText') || {}).value || ''; return cmdGo(); }
+  if (b.dataset.cmda) { c.pick.has(b.dataset.cmda) ? c.pick.delete(b.dataset.cmda) : c.pick.add(b.dataset.cmda); keep(); return; }
+  if (b.dataset.cmdh !== undefined) { const i = Number(b.dataset.cmdh); c.pick.has(i) ? c.pick.delete(i) : c.pick.add(i); keep(); return; }
+  if (b.dataset.cmd === 'all') { c.pick = new Set(c.hits.map((_, i) => i)); keep(); return; }
+  if (b.dataset.cmd === 'none') { c.pick = new Set(); keep(); return; }
+  if (b.dataset.cmd === 'apply') return cmdApply();
+}
+
+function cmdGo() {
+  const c = CMD;
+  const q = parseCommand(c.text);
+  if (q.verb === 'create') {
+    const r = parseNatural(c.text);
+    if (!r) { c.q = null; renderCommand(); toast('Je n’ai pas compris. Commence par un verbe (supprime, désactive, saute, décale…) ou indique une heure pour créer une alarme.', 5000); return; }
+    closeSheet();
+    // après la fin du toucher en cours (sinon il refermerait la nouvelle feuille)
+    setTimeout(() => {
+      openEditor(null, r.schedule && r.schedule.dates && r.schedule.dates[0]);
+      if (r.title) ED.title = r.title;
+      if (r.time) ED.time = r.time;
+      if (r.schedule) ED.schedule = r.schedule;
+      renderEditor();
+      toast('Nouvelle alarme préremplie : vérifie puis Enregistrer', 4000);
+    }, 50);
+    return;
+  }
+  c.q = q; c.pick = null; c.hits = null; c.list = null;
+  renderCommand();
+}
+
+/** Applique l'action sur une sonnerie (alarme a, jour ds). Renvoie l'alarme à mettre à la corbeille si elle disparaît. */
+function cmdDropDay(a, ds) {
+  const sc = a.schedule;
+  if (sc.type === 'dates') {
+    sc.dates = sc.dates.filter(x => x !== ds);
+    a.updatedAt = Date.now();
+    return sc.dates.length ? null : a;
+  }
+  sc.except = [...new Set([...(sc.except || []), ds])];
+  sc.extra = (sc.extra || []).filter(x => x !== ds);
+  a.updatedAt = Date.now();
+  return null;
+}
+
+async function cmdApply() {
+  const c = CMD, q = c.q;
+  const done = async (msg) => { closeSheet(); await saveAlarms(); render(); toast(msg, 4500); };
+  if (q.verb === 'resume') { delete S.settings.pause; await saveSettings(); logAction('commande : pause arrêtée'); closeSheet(); render(); toast('Pause arrêtée : les alarmes sonnent à nouveau'); return; }
+  if (q.verb === 'pause' && !q.words && !q.imported) {
+    S.settings.pause = { from: ymd(today0()), until: ymd(c.pauseUntil), scopes: [{ kind: 'all' }] };
+    await saveSettings(); logAction('commande : PAUSE ' + pauseLabel(S.settings.pause)); closeSheet(); render();
+    toast('⏸ En pause : ' + pauseLabel(S.settings.pause), 4000); return;
+  }
+  const snapA = clone(S.alarms), snapSkip = clone(S.skip);
+  if (c.whole) {
+    const sel = S.alarms.filter(a => c.pick.has(a.id));
+    if (!sel.length) return;
+    if (q.verb === 'del') {
+      if (!confirm(`Supprimer ${sel.length} alarme(s) en entier ?`)) return;
+      await rememberDeleted(sel); await toTrash(sel, 'Supprimées (commande)');
+      S.alarms = S.alarms.filter(a => !c.pick.has(a.id));
+    } else if (q.verb === 'off' || q.verb === 'on') {
+      sel.forEach(a => { a.enabled = q.verb === 'on'; a.updatedAt = Date.now(); });
+    } else if (q.shift) {
+      sel.forEach(a => {
+        if (isRel(a)) a.schedule.rel.before = Math.max(0, a.schedule.rel.before - q.shift);
+        else a.time = fmtTime(new Date(atTime(ymd(today0()), a.time).getTime() + q.shift * 60000));
+        a.updatedAt = Date.now();
+      });
+    }
+    logAction(`commande « ${c.text} » : ${sel.length} alarme(s)`);
+    await done(`${CMD_LABEL[q.verb]} : ${sel.length} alarme(s)`);
+  } else {
+    const hits = c.hits.filter((_, i) => c.pick.has(i));
+    if (!hits.length) return;
+    if (q.verb === 'del' && hits.length > 20 && !confirm(`Supprimer ${hits.length} sonneries ?`)) return;
+    const removed = [];
+    if (q.verb === 'on') {
+      for (const h of hits) { h.a.enabled = true; const sc = h.a.schedule; if (sc.except) sc.except = sc.except.filter(x => x !== h.ds); }
+    } else if (q.verb === 'later' || q.verb === 'earlier') {
+      // chaque sonnerie déplacée devient une alarme « date choisie » à la nouvelle heure
+      const byA = new Map();
+      for (const h of hits) { if (!byA.has(h.a.id)) byA.set(h.a.id, { a: h.a, list: [] }); byA.get(h.a.id).list.push(h); }
+      for (const { a, list } of byA.values()) {
+        const groups = new Map();
+        for (const h of list) {
+          const nd = new Date(h.d.getTime() + q.shift * 60000);
+          const k = fmtTime(nd);
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k).push(ymd(nd));
+          const r = cmdDropDay(a, h.ds); if (r) removed.push(r);
+        }
+        for (const [time, dates] of groups) {
+          const n = clone(a); n.id = uid(); n.time = time; n.source = null;
+          n.schedule = Object.assign(newSchedule('dates'), { dates: [...new Set(dates)].sort() });
+          n.createdAt = n.updatedAt = Date.now(); delete n.okWith;
+          S.alarms.push(n);
+        }
+      }
+    } else {
+      for (const h of hits) { const r = cmdDropDay(h.a, h.ds); if (r) removed.push(r); }
+      if (q.verb === 'del' || q.verb === 'skip' || q.verb === 'off' || q.verb === 'pause') await rememberDeleted(removed);
+    }
+    const rm = new Set(removed.map(a => a.id));
+    if (rm.size) { await toTrash(removed, 'Retirées (commande)'); S.alarms = S.alarms.filter(a => !rm.has(a.id)); }
+    logAction(`commande « ${c.text} » : ${hits.length} sonnerie(s)`);
+    closeSheet(); await saveAlarms(); render();
+    toastAction(`${CMD_LABEL[q.verb === 'pause' ? 'skip' : q.verb]} : ${hits.length} sonnerie(s)`, 'Annuler', async () => {
+      S.alarms = snapA; S.skip = snapSkip; await DB.set('importSkip', S.skip); await saveAlarms(); render();
+      logAction(`annulation de la commande « ${c.text} »`); toast('Commande annulée');
+    }, 8000);
+  }
+}
+
 /* ---------- Saisie en une phrase ---------- */
 function parseNatural(text, now = new Date()) {
   let s = ' ' + (text || '').replace(/\s+/g, ' ').trim() + ' ';
@@ -2219,7 +2529,7 @@ function showSheet() {
 function closeSheet(fromPop) {
   const s = $('#sheet');
   const wasOpen = !s.hidden;
-  s.hidden = true; s.innerHTML = ''; ED = null; BE = null; DP = null; CF = null;
+  s.hidden = true; s.innerHTML = ''; ED = null; BE = null; DP = null; CF = null; CMD = null;
   document.body.classList.remove('lock');
   if (wasOpen && !fromPop && history.state && history.state.sheet) history.back();
 }
@@ -2701,6 +3011,7 @@ function bindSheet() {
     if (BE) return bulkClick(e);
     if (DP) return datesClick(e);
     if (CF) return conflictClick(e);
+    if (CMD) return cmdClick(e);
     if (!ED) {
       const d = e.target.closest('[data-dt]');
       if (d) {
@@ -2868,6 +3179,11 @@ function bindSheet() {
     if (e.target.id === 'edRelBefore') { readEditorFields(); const pv = $('#edRelPrev'); if (pv) pv.textContent = relPreview(ED) || '—'; refreshEditorCalendar(); }
     if (e.target.id === 'edEvOffset') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
     if (e.target.id === 'edMode') { const y = $('#sheet').scrollTop; readEditorFields(); renderEditor(); $('#sheet').scrollTop = y; }
+  });
+  s.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    if (e.target.id === 'cmdText') { e.preventDefault(); CMD.text = e.target.value; cmdGo(); }
+    if (e.target.id === 'edNl') { e.preventDefault(); editorAction('nl', { dataset: { ed: 'nl' } }); }
   });
   s.addEventListener('change', async e => {
     if (e.target.dataset && e.target.dataset.dtbackup) {
@@ -3857,6 +4173,7 @@ function bindMain() {
       return;
     }
     if (e.target.closest('[data-stop]')) return;
+    if (e.target.closest('[data-cmdopen]')) { openCommand(); return; }
     const pz = e.target.closest('[data-pause]');
     if (pz) {
       if (pz.dataset.pause === 'stop') { delete S.settings.pause; logAction('pause arrêtée'); await saveSettings(); render(); toast('Pause arrêtée : les alarmes sonnent à nouveau'); }

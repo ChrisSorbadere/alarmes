@@ -414,3 +414,13 @@ body.selmode { padding-bottom: calc(var(--sab) + 170px); }
 .backupbox { margin-top: 12px; }
 .backupbox .row { align-items: center; }
 .row > .switch { flex: none; }
+.cmdsum { margin: 10px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--soft); font-weight: 600; font-size: 14px; }
+.cmdlist { display: flex; flex-direction: column; gap: 6px; }
+.cmditem { display: flex; gap: 10px; align-items: center; text-align: left; border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 10px; }
+.cmditem i { flex: none; width: 24px; height: 24px; border-radius: 7px; border: 2px solid var(--muted); display: grid; place-items: center; font-style: normal; font-weight: 800; }
+.cmditem.on i { background: var(--ink); border-color: var(--ink); color: var(--card); }
+.cmditem span { min-width: 0; }
+.cmditem b { display: block; }
+.cmditem small { display: block; color: var(--muted); font-size: 12px; }
+.cmddates { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip.on { background: var(--ink); color: var(--card); border-color: var(--ink); }

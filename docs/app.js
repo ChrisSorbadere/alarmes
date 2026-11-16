@@ -1,7 +1,7 @@
 /* Alarmes — appli d'alarmes sur mesure (Chris) */
 'use strict';
 
-const VERSION = '1.22.0';
+const VERSION = '1.23.0';
 const HORIZON_DAYS = 62;      // fenêtre programmée à l'avance côté Android
 const MAX_NATIVE = 450;       // limite prudente (Android plafonne à 500 alarmes par appli)
 
@@ -124,6 +124,8 @@ async function loadAll() {
   S.timers = await DB.get('timers', []);
   S.library = await DB.get('photoLib', []);
   S.skip = await DB.get('importSkip', {});
+  S.trash = await DB.get('trash', []);
+  S.trash = S.trash.filter(t => Date.now() - t.at < 30 * 86400000);
   S.cals = await DB.get('calendars', null);
   if (!Array.isArray(S.cals)) {
     const old = await DB.get('schoolCal', null);
@@ -868,8 +870,8 @@ function openPause(draft) {
     }
     const done = async msg => { $('#sheet').onclick = null; closeSheet(); await saveSettings(); render(); toast(msg, 3500); };
     if (b.dataset.pz === 'close') { $('#sheet').onclick = null; closeSheet(); }
-    if (b.dataset.pz === 'stop') { delete S.settings.pause; await done('Pause arrêtée : les alarmes sonnent à nouveau'); }
-    if (b.dataset.pz === 'save') { S.settings.pause = st; await done('⏸ En pause : ' + pauseLabel(st)); }
+    if (b.dataset.pz === 'stop') { delete S.settings.pause; logAction('pause arrêtée'); await done('Pause arrêtée : les alarmes sonnent à nouveau'); }
+    if (b.dataset.pz === 'save') { S.settings.pause = st; logAction('PAUSE : ' + pauseLabel(st)); await done('⏸ En pause : ' + pauseLabel(st)); }
   };
   showSheet();
 }
@@ -1017,12 +1019,15 @@ async function deleteWithUndo(id) {
   S.sel.delete(id);
   const skipBefore = clone(S.skip);
   await rememberDeleted([a]);
+  await toTrash([a], 'Supprimée (glissement)');
   await saveAlarms();
   refreshView();
   const several = a.schedule.type !== 'dates' || a.schedule.dates.length > 1;
   toastAction(`« ${(a.title || 'Alarme').slice(0, 40)} » supprimée${several ? ' (toutes ses dates)' : ''}`, 'Annuler', async () => {
     S.alarms.splice(Math.min(idx, S.alarms.length), 0, a);
     S.skip = skipBefore; await DB.set('importSkip', S.skip);
+    S.trash = S.trash.filter(t => t.a.id !== a.id); await DB.set('trash', S.trash);
+    logAction('annulation de la suppression ' + descA(a));
     await saveAlarms();
     refreshView();
     toast('Alarme restaurée');
@@ -1044,6 +1049,7 @@ async function selAction(act) {
   if (act === 'dates') { openDatesPicker([...ids]); return; }
   if (act === 'on' || act === 'off') {
     S.alarms.forEach(a => { if (ids.has(a.id)) a.enabled = act === 'on'; });
+    logAction(`${act === 'on' ? 'activation' : 'désactivation'} de ${n} alarme(s) : ${S.alarms.filter(a => ids.has(a.id)).slice(0, 3).map(descA).join(', ')}`);
     await saveAlarms(); refreshView();
     toast(`${n} alarme(s) ${act === 'on' ? 'activée(s)' : 'désactivée(s)'}`);
     return;
@@ -1051,11 +1057,68 @@ async function selAction(act) {
   if (act === 'del') {
     if (!confirm(`Supprimer définitivement ${n} alarme(s) ?`)) return;
     await rememberDeleted(S.alarms.filter(a => ids.has(a.id)));
+    await toTrash(S.alarms.filter(a => ids.has(a.id)), 'Supprimées (sélection)');
     S.alarms = S.alarms.filter(a => !ids.has(a.id));
     S.sel.clear(); S.selMode = false;
     await saveAlarms(); render();
     toast(`${n} alarme(s) supprimée(s)`);
   }
+}
+
+/* ---------- Journal des actions + corbeille ---------- */
+function logAction(msg) {
+  if (Native && Native.addLog) Native.addLog({ msg: 'Action : ' + msg }).catch(() => {});
+}
+const descA = a => `« ${(a.title || 'Alarme').slice(0, 50)} » ${isRel(a) ? '(avant les cours)' : a.time}`;
+/** Garde les alarmes supprimées 30 jours pour pouvoir les restaurer. */
+async function toTrash(list, why) {
+  if (!list.length) return;
+  const at = Date.now();
+  for (const a of list) S.trash.unshift({ at, why, a: clone(a) });
+  S.trash = S.trash.slice(0, 1500);
+  await DB.set('trash', S.trash);
+  logAction(`${why} : ${list.length > 3 ? list.length + ' alarmes dont ' : ''}${list.slice(0, 3).map(descA).join(', ')}`);
+}
+function openTrash() {
+  ED = null; BE = null; DP = null; CF = null;
+  const groups = new Map();
+  for (const t of S.trash) {
+    const k = t.at + '|' + t.why;
+    if (!groups.has(k)) groups.set(k, { at: t.at, why: t.why, items: [] });
+    groups.get(k).items.push(t);
+  }
+  const gl = [...groups.values()];
+  $('#sheet').innerHTML = `
+  <div class="sheet-head"><button data-tr="close">✕</button><h3>Corbeille</h3><span></span></div>
+  <div class="sheet-body">
+    <p class="note" style="margin-top:0">Les alarmes supprimées sont gardées 30 jours. Touche « Restaurer » pour les remettre telles quelles.</p>
+    ${gl.length ? gl.map((g, i) => `<div class="card">
+      <div class="note" style="margin:0">${fmtShort(new Date(g.at))} ${fmtTime(new Date(g.at))} · ${esc(g.why)}</div>
+      <div style="margin:4px 0 8px"><b>${g.items.length > 1 ? g.items.length + ' alarmes' : esc(titleOf(g.items[0].a))}</b>${g.items.length > 1 ? `<div class="note" style="margin:0">${esc([...new Set(g.items.map(t => t.a.title || 'Alarme'))].slice(0, 4).join(', '))}</div>` : `<div class="note" style="margin:0">${esc(isRel(g.items[0].a) ? relLabel(g.items[0].a.schedule.rel) : g.items[0].a.time)} · ${esc(scheduleSummary(g.items[0].a))}</div>`}</div>
+      <button class="btn small primary" data-trr="${i}">↺ Restaurer</button></div>`).join('') : '<p class="note">La corbeille est vide.</p>'}
+  </div>`;
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.tr === 'close') { $('#sheet').onclick = null; closeSheet(); return; }
+    if (b.dataset.trr !== undefined) {
+      const g = gl[Number(b.dataset.trr)];
+      const ids = new Set(S.alarms.map(a => a.id));
+      let n = 0;
+      for (const t of g.items) {
+        const a = clone(t.a);
+        if (ids.has(a.id)) a.id = uid();
+        S.alarms.push(a); n++;
+        if (a.source && a.source.key && S.skip[a.source.name]) S.skip[a.source.name] = S.skip[a.source.name].filter(k => k !== a.source.key);
+      }
+      S.trash = S.trash.filter(t => !g.items.includes(t));
+      await DB.set('trash', S.trash); await DB.set('importSkip', S.skip);
+      await saveAlarms();
+      logAction(`restauration depuis la corbeille : ${n} alarme(s)`);
+      $('#sheet').onclick = null; closeSheet(); render();
+      toast(`${n} alarme(s) restaurée(s)`, 3500);
+    }
+  };
+  showSheet();
 }
 
 /* ---------- Alarmes semblables et choix des dates ---------- */
@@ -1167,6 +1230,8 @@ async function conflictClick(e) {
       });
     }
     await rememberDeleted(removed);
+    await toTrash(removed, 'Retirées (alarmes proches)');
+    if (nDel) logAction(`alarmes proches : ${nDel} sonnerie(s) retirée(s) d’autres alarmes pour ${descA(ED)}`);
     const rm = new Set(removed.map(x => x.id));
     S.alarms = S.alarms.filter(x => !rm.has(x.id));
     ED.okWith = ED.okWith.filter(id => !rm.has(id));
@@ -1268,6 +1333,8 @@ async function datesClick(e) {
       else { a.schedule.dates = left; a.updatedAt = Date.now(); }
     }
     await rememberDeleted(removed);
+    await toTrash(removed, 'Supprimées (choix des dates)');
+    logAction(`choix des dates : ${dels.size} date(s) supprimée(s)`);
     const rm = new Set(removed.map(a => a.id));
     S.alarms = S.alarms.filter(a => !rm.has(a.id));
     for (const id of rm) S.sel.delete(id);
@@ -2508,7 +2575,11 @@ async function editorAction(act, el) {
       ED.updatedAt = Date.now();
       if (ED.source) ED.source.edited = true;
       const i = S.alarms.findIndex(x => x.id === ED.id);
-      if (i >= 0) S.alarms[i] = ED; else S.alarms.push(ED);
+      if (i >= 0) {
+        const old = S.alarms[i];
+        if (old.title !== ED.title || old.time !== ED.time || JSON.stringify(old.schedule) !== JSON.stringify(ED.schedule) || old.enabled !== ED.enabled) logAction(`modification ${descA(old)} → ${descA(ED)} · ${scheduleSummary(ED)}`);
+        S.alarms[i] = ED;
+      } else { S.alarms.push(ED); logAction(`création ${descA(ED)} · ${scheduleSummary(ED)}`); }
       const n = nextOcc(ED);
       closeSheet();
       await saveAlarms();
@@ -2518,6 +2589,7 @@ async function editorAction(act, el) {
     }
     case 'delete':
       if (!confirm('Supprimer cette alarme ?')) return;
+      { const old = S.alarms.find(x => x.id === ED.id); if (old) await toTrash([old], 'Supprimée (fiche)'); }
       S.alarms = S.alarms.filter(x => x.id !== ED.id);
       closeSheet(); await saveAlarms(); render(); toast('Alarme supprimée');
       return;
@@ -3103,7 +3175,7 @@ function buildCandidates() {
     while (seen[k]) k = c.key + '#' + n++;
     c.key = k; seen[k] = 1;
   }
-  const ex = new Set((S.skip || {})[S.imp.sourceName] || []);
+  const ex = new Set(S.imp.recreate ? [] : (S.skip || {})[S.imp.sourceName] || []);
   const kept = out.filter(c => !ex.has(c.key));
   skipped.excluded = out.length - kept.length;
   return { list: kept, skipped };
@@ -3153,8 +3225,11 @@ async function applyImport() {
     const now = new Date();
     const ids = new Set(d.del.filter(a => { const n = nextOcc(a, now); return n || !a.enabled; }).map(a => a.id));
     removed = ids.size;
+    await toTrash(S.alarms.filter(a => ids.has(a.id)), `Retirées par l’import « ${src} »`);
     S.alarms = S.alarms.filter(a => !ids.has(a.id));
   }
+  if (S.imp && S.imp.recreate) { delete S.skip[src]; await DB.set('importSkip', S.skip); }
+  logAction(`import « ${src} » : ${d.add.length} créées, ${d.upd.length} mises à jour, ${removed} retirées`);
   S.settings.veilleTime = S.imp.veilleTime;
   await DB.set('settings', S.settings);
   await saveAlarms();
@@ -3242,6 +3317,7 @@ function renderImport(v) {
       <input type="text" id="impName" value="${esc(I.sourceName)}">
       <div class="summary"><b>${list.length}</b> alarmes : ${diff.add.length} nouvelles, ${diff.upd.length} modifiées, ${diff.same.length} inchangées.
         ${skipped.past ? `<br>${skipped.past} lignes ignorées (dates passées).` : ''}${skipped.nodate ? `<br>${skipped.nodate} lignes sans date lisible.` : ''}${skipped.excluded ? `<br>${skipped.excluded} date(s) que tu as supprimée(s) ne seront pas recréées.` : ''}</div>
+      ${skipped.excluded || I.recreate ? `<label class="custom-color"><input type="checkbox" id="impRecreate" ${I.recreate ? 'checked' : ''} style="width:20px;height:20px"> Recréer aussi les dates supprimées à la main</label>` : ''}
       ${diff.del.length ? `<label class="custom-color"><input type="checkbox" id="impDel" ${I.removeMissing ? 'checked' : ''} style="width:20px;height:20px"> Supprimer ${diff.del.length} alarme(s) de cet import absente(s) du fichier ou des filtres</label>` : ''}
       <div class="preview" style="margin-top:8px">
         ${list.slice(0, 150).map(c => `<div style="--c:${LEVELS.find(l => l.id === c.level).color}"><span class="dot"></span><span style="flex:1"><b>${fmtShort(parseYmd(c.date))} ${c.time}</b> — ${esc(c.title)}</span>${tag(c)}</div>`).join('')}
@@ -3271,6 +3347,7 @@ function bindImport() {
     if (b.dataset.delsrc) {
       const n = b.dataset.delsrc;
       if (!confirm(`Supprimer toutes les alarmes de « ${n} » ?`)) return;
+      await toTrash(S.alarms.filter(a => a.source && a.source.name === n), `Import « ${n} » supprimé`);
       S.alarms = S.alarms.filter(a => !(a.source && a.source.name === n));
       delete S.skip[n]; await DB.set('importSkip', S.skip);
       await saveAlarms(); render(); toast('Alarmes supprimées'); return;
@@ -3304,6 +3381,7 @@ function bindImport() {
     else if (t.id === 'impYear') I.schoolYear = Number(t.value);
     else if (t.id === 'impPast') I.skipPast = t.checked;
     else if (t.id === 'impDel') I.removeMissing = t.checked;
+    else if (t.id === 'impRecreate') I.recreate = t.checked;
     else if (t.id === 'impVeille') I.veilleTime = t.value || '20:00';
     else if (t.id === 'impDay') I.dayTime = t.value || '07:00';
     else if (t.id === 'impBefore') I.beforeMin = Math.max(1, Number(t.value) || 30);
@@ -3474,6 +3552,9 @@ async function renderSettings(v) {
       <div style="margin-top:6px">• <b>Accès spécial</b> (Paramètres › Applis) : « Afficher par-dessus d’autres applis » et, s’il existe, « Notifications plein écran » ou « Afficher sur l’écran de verrouillage ».</div>
       <div class="btns"><button class="btn small" data-open="app">Ouvrir la fiche de l’appli</button></div>
     </div>
+    <h2>Corbeille</h2>
+    <div class="card"><p class="note" style="margin-top:0">Les alarmes supprimées sont gardées 30 jours (${S.trash.length} en ce moment).</p>
+      <div class="btns"><button class="btn small" data-set="trash">🗑 Ouvrir la corbeille</button></div></div>
     <h2>Journal des alarmes</h2>
     <div class="card"><p class="note" style="margin-top:0">Chaque étape (programmation, alarme reçue, son lancé, écran affiché, erreurs). Utile si une alarme n’a pas sonné.</p>
       <div class="btns"><button class="btn small" data-set="journal">📜 Voir le journal</button></div></div>` : `<div class="card"><b>Mode navigateur</b><p class="note">Ici, les alarmes ne sonnent que si la page est ouverte. Installe l'APK Android pour de vraies alarmes, même téléphone verrouillé.</p>
@@ -3605,6 +3686,7 @@ function bindSettings() {
     if (b.dataset.set === 'checkupdate') { toast('Recherche d’une mise à jour…'); const u = await checkUpdate(true); keepScroll(render); toast(u ? `Version ${u.version} disponible` : 'Tu as la dernière version'); return; }
     if (b.dataset.set === 'doupdate') { installUpdate(); return; }
     if (b.dataset.set === 'journal') { openJournal(); return; }
+    if (b.dataset.set === 'trash') { openTrash(); return; }
     if (b.dataset.set === 'schooladd' || b.dataset.calrep) { S.calReplace = b.dataset.calrep || null; const i = $('#schoolFile'); i.value = ''; i.click(); return; }
     if (b.dataset.calren) {
       const c = calById(b.dataset.calren); const n = (prompt('Nouveau nom :', c.name) || '').trim();
@@ -3767,6 +3849,7 @@ function bindMain() {
       const a = S.alarms.find(x => x.id === tg.dataset.toggle);
       if (a) {
         a.enabled = tg.checked; await saveAlarms();
+        logAction(`${a.enabled ? 'activée' : 'DÉSACTIVÉE'} (interrupteur) ${descA(a)}`);
         const n = a.enabled ? nextOcc(a) : null;
         toast(a.enabled ? (n ? `Activée · ${relDay(n)} ${fmtTime(n)}` : 'Activée (aucune date à venir)') : 'Désactivée');
         refreshView();
@@ -3776,7 +3859,7 @@ function bindMain() {
     if (e.target.closest('[data-stop]')) return;
     const pz = e.target.closest('[data-pause]');
     if (pz) {
-      if (pz.dataset.pause === 'stop') { delete S.settings.pause; await saveSettings(); render(); toast('Pause arrêtée : les alarmes sonnent à nouveau'); }
+      if (pz.dataset.pause === 'stop') { delete S.settings.pause; logAction('pause arrêtée'); await saveSettings(); render(); toast('Pause arrêtée : les alarmes sonnent à nouveau'); }
       else openPause();
       return;
     }
